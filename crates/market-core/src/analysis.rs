@@ -63,6 +63,73 @@ pub struct FlipRow {
     pub start_confidence: Option<String>,
     #[serde(default)]
     pub end_confidence: Option<String>,
+    #[serde(default)]
+    pub item_identity: Option<FlipItemIdentity>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq, Hash)]
+#[serde(default)]
+pub struct FlipItemIdentity {
+    pub name: String,
+    pub variant: Option<String>,
+    pub base_type: Option<String>,
+    pub links: Option<u64>,
+    pub gem_level: Option<u64>,
+    pub gem_quality: Option<u64>,
+    pub corrupted: Option<bool>,
+    pub map_tier: Option<u64>,
+    pub cluster_level: Option<u64>,
+}
+
+impl FlipItemIdentity {
+    pub fn from_line(category: &str, line: &Line) -> Self {
+        let variant = line.variant.clone().filter(|variant| {
+            let corrupted = variant.ends_with('c');
+            let raw = variant.strip_suffix('c').unwrap_or(variant);
+            let (level, quality) = raw.split_once('/').unwrap_or((raw, "0"));
+            // Dumps encode gem attributes in Variant; live overviews expose separate fields.
+            !(line.gem_level.is_some()
+                && level.parse::<u64>().ok() == line.gem_level
+                && quality.parse::<u64>().ok() == line.gem_quality
+                && Some(corrupted) == line.corrupted)
+        });
+        Self {
+            name: line.name.clone(),
+            variant,
+            base_type: line.base_type.clone(),
+            links: line.links,
+            gem_level: line.gem_level,
+            gem_quality: line.gem_quality,
+            corrupted: line.corrupted,
+            map_tier: line.map_tier,
+            cluster_level: if category == "ClusterJewel" {
+                line.metadata
+                    .get("levelRequired")
+                    .and_then(serde_json::Value::as_u64)
+            } else {
+                None
+            },
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct CurrentAvailability {
+    pub league: String,
+    pub items: Vec<CurrentItem>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct CurrentItem {
+    pub id: String,
+    pub status: String,
+    pub price: Option<String>,
+    pub listings: Option<u64>,
+    pub fetched_at: Option<String>,
+    pub source: Option<String>,
+    pub detail: String,
+    #[serde(default)]
+    pub sparkline: Vec<Option<String>>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

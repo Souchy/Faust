@@ -10,6 +10,7 @@ import { FlipAnalysis } from './pages/flip-analysis/flip-analysis';
 import { TriangularArbitrage } from './pages/triangular-arbitrage/triangular-arbitrage';
 
 export class MarketApp {
+  readonly devMode = import.meta.env.DEV;
   readonly router = resolve(IRouter);
   readonly session = resolve(MarketSession);
   get prices(): CurrentPrices | null { return this.session.prices; }
@@ -21,12 +22,16 @@ export class MarketApp {
     return {
       title: 'Faust',
       routes: [
-        { path: '', redirectTo: 'prices' },
-        { path: 'prices', component: CurrentPrices, title: 'Current prices' },
+        { path: '', redirectTo: this.devMode ? 'prices' : 'flips' },
+        ...(this.devMode ? [
+          { path: 'prices', component: CurrentPrices, title: 'Current prices' },
+          { path: 'exchange', component: CurrencyExchange, title: 'Currency Exchange' },
+          { path: ['triangular-arbitrage', 'arbitrage'], component: TriangularArbitrage, title: 'Triangular arbitrage' },
+        ] : [
+          { path: ['prices', 'exchange', 'triangular-arbitrage', 'arbitrage'], redirectTo: 'flips' },
+        ]),
         { path: 'gems', component: GemFlipping, title: 'Gem flipping' },
-        { path: 'exchange', component: CurrencyExchange, title: 'Currency Exchange' },
         { path: 'flips', component: FlipAnalysis, title: 'Flip analysis' },
-        { path: ['triangular-arbitrage', 'arbitrage'], component: TriangularArbitrage, title: 'Triangular arbitrage' },
         { path: 'settings', component: SettingsPage, title: 'Settings' },
       ],
     };
@@ -80,6 +85,6 @@ export class MarketApp {
 
   async browseArchive(archive: EconomyArchive): Promise<void> {
     await this.selectDataset(`archive:${archive.league ?? archive.name}`);
-    await this.router.load('/prices');
+    await this.router.load(this.devMode ? '/prices' : '/flips');
   }
 }

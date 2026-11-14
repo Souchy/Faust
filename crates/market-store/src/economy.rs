@@ -413,6 +413,29 @@ impl SqliteStore {
             .transpose()
     }
 
+    pub async fn current_economies(
+        &self,
+        league: &str,
+        categories: &[String],
+    ) -> Result<Vec<Overview>, StoreError> {
+        if categories.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut query = sqlx::QueryBuilder::<sqlx::Sqlite>::new(
+            "SELECT overview_json FROM economy_current WHERE league=",
+        );
+        query.push_bind(league).push(" AND category IN (");
+        let mut values = query.separated(", ");
+        for category in categories {
+            values.push_bind(category);
+        }
+        values.push_unseparated(")");
+        let json: Vec<String> = query.build_query_scalar().fetch_all(&self.pool).await?;
+        json.into_iter()
+            .map(|value| serde_json::from_str(&value).map_err(StoreError::from))
+            .collect()
+    }
+
     pub async fn economy_dates(
         &self,
         league: &str,
@@ -633,6 +656,43 @@ impl SqliteStore {
             },
             points,
         })
+    }
+
+    pub async fn economy_price_histories(
+        &self,
+        league: &str,
+        category: &str,
+        source: &str,
+        start: &str,
+        end: &str,
+        item: Option<&str>,
+    ) -> Result<BTreeMap<String, Vec<Point>>, StoreError> {
+        let sql = format!("SELECT item,observed_at,price,currency,granularity,volume FROM economy_observations o
+            WHERE league=? AND category=? AND source=? AND observed_at>=? AND observed_at<=?
+            AND (archive IS NULL OR EXISTS (SELECT 1 FROM economy_imports a WHERE a.name=o.archive AND json_extract(a.status_json,'$.status')='completed'))
+            {} ORDER BY observed_at", if item.is_some() { "AND item=?" } else { "" });
+        let mut query = sqlx::query(&sql)
+            .bind(league)
+            .bind(category)
+            .bind(source)
+            .bind(start)
+            .bind(end);
+        if let Some(item) = item {
+            query = query.bind(item);
+        }
+        let rows = query.fetch_all(&self.pool).await?;
+        let mut result = BTreeMap::<String, Vec<Point>>::new();
+        for row in rows {
+            result.entry(row.get("item")).or_default().push(Point {
+                date: row.get("observed_at"),
+                price: row.get("price"),
+                currency: row.get("currency"),
+                granularity: row.get("granularity"),
+                volume: row.get("volume"),
+                confidence: None,
+            });
+        }
+        Ok(result)
     }
 
     pub async fn imported_leagues(&self) -> Result<Vec<String>, StoreError> {

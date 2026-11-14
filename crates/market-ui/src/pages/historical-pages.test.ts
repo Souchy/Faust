@@ -3,7 +3,9 @@ import { describe, expect, it, vi } from 'vitest';
 import { MarketApi } from '../core/market-api';
 import { latestHour, localInput } from '../core/historical';
 import { MarketSession } from '../services/market-session';
-import { analysisPeriod, arbitrageAnalysis, flipAnalysis, flipSparklines, gggCoverage, gggHistory, gggJob, gggMarket, gggOverview } from '../testing/historical-fixtures';
+import { ClientSettings } from '../services/client-settings';
+import type { FlipPeriodSelection } from '../core/api-types';
+import { analysisPeriod, arbitrageAnalysis, currentAvailability, flipAnalysis, flipSparklines, gggCoverage, gggHistory, gggJob, gggMarket, gggOverview } from '../testing/historical-fixtures';
 import { CurrencyExchange } from './currency-exchange/currency-exchange';
 import { FlipAnalysis } from './flip-analysis/flip-analysis';
 import { TriangularArbitrage } from './triangular-arbitrage/triangular-arbitrage';
@@ -11,14 +13,158 @@ import { TriangularArbitrage } from './triangular-arbitrage/triangular-arbitrage
 function workspace() {
   const api = new MarketApi('');
   vi.spyOn(api, 'analysisPeriod').mockImplementation(async (league) => analysisPeriod(league));
+  vi.spyOn(api, 'leagueStart').mockImplementation(async (league) => ({ league, start: analysisPeriod(league).start, approximate: true }));
+  const settings = new ClientSettings();
+  vi.spyOn(settings, 'loadFlipPeriod').mockResolvedValue(null);
+  vi.spyOn(settings, 'saveFlipPeriod').mockResolvedValue(undefined);
   vi.spyOn(api, 'flipSparklines').mockImplementation(async (_league, start, end, rows) => flipSparklines(rows, start, end));
-  const container = DI.createContainer().register(Registration.instance(MarketApi, api), Registration.singleton(MarketSession, MarketSession));
+  vi.spyOn(api, 'currentAvailability').mockImplementation(async (league, rows) => currentAvailability(league, rows));
+  const container = DI.createContainer().register(Registration.instance(MarketApi, api), Registration.instance(ClientSettings, settings), Registration.singleton(MarketSession, MarketSession));
   const session = container.get(MarketSession);
   session.leagues = [{ id: 'standard', name: 'Standard' }];
   session.selectedLeagueId = 'standard';
-  return { api, container, session };
+  return { api, settings, container, session };
 }
 describe('Historical pages', () => {
+  it('projects exact current league age from launch rather than observation bounds and updates every minute', async () => {
+    vi.useFakeTimers();
+    try {
+      const { api, container, session } = workspace();
+      session.historicalLeague = 'Mirage';
+      const now = Date.parse('2026-11-14T18:00:00Z');
+      vi.setSystemTime(now);
+      const age = (2 * 24 + 5) * 3600;
+      const historicalStart = analysisPeriod('Mirage').start! - 3600;
+      vi.mocked(api.leagueStart).mockImplementation(async league => ({
+        league, start: league === 'Standard' ? now / 1000 - age : historicalStart, approximate: false,
+      }));
+      vi.spyOn(api, 'flips').mockResolvedValue(flipAnalysis());
+      const page = container.invoke(FlipAnalysis); await page.datasetChanged();
+      expect(page.minimum).toBe(historicalStart);
+      expect(page.referenceTime).toBe(historicalStart + age);
+      expect(page.referenceLabel).toContain('2d 5h 0m');
+      expect(page.referenceLabel).not.toContain('Approximate');
+      const start = page.start, end = page.end;
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(page.referenceTime).toBe(historicalStart + age + 60);
+      expect([page.start, page.end]).toEqual([start, end]);
+      page.unbinding();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally { vi.useRealTimers(); }
+  });
+  it('labels approximate launches and exposes missing metadata without preventing ranking', async () => {
+    const { api, container, session } = workspace();
+    session.historicalLeague = 'Mirage';
+    vi.spyOn(api, 'flips').mockResolvedValue(flipAnalysis());
+    const page = container.invoke(FlipAnalysis); await page.datasetChanged();
+    expect(page.referenceLabel).toContain('(approx.)');
+    expect(page.referenceLabel).not.toContain('earliest known dataset date');
+    vi.mocked(api.leagueStart).mockRejectedValue(new Error('Official metadata HTTP 503'));
+    await page.datasetChanged();
+    expect(page.referenceTime).toBeNull();
+    expect(page.referenceError).toContain('HTTP 503');
+    expect(page.result).not.toBeNull();
+    page.unbinding();
+  });
+  it('restores filters and zoom before the first ranking request and sends presence to the live league', async () => {
+    const { api, container, session, settings } = workspace();
+    session.historicalLeague = 'Mirage';
+    const bounds = analysisPeriod('Mirage');
+    const saved: FlipPeriodSelection = {
+      start: bounds.start!, end: bounds.end!,
+      viewport: { start: bounds.start! + 1200.5, end: bounds.end! - 1200.5 },
+      filters: { minPrice: '1', maxPrice: '500', minVolume: '20', minConfidence: 'Medium',
+        strictStart: true, search: 'oil', category: 'Oil', venue: 'trade', sort: 'value-asc', presence: 'observed' },
+    };
+    vi.mocked(settings.loadFlipPeriod).mockResolvedValue(saved);
+    const flips = vi.spyOn(api, 'flips').mockResolvedValue(flipAnalysis());
+    const page = container.invoke(FlipAnalysis); await page.datasetChanged();
+    expect(page.viewport).toEqual(saved.viewport);
+    expect(flips.mock.calls[0]?.[3]).toMatchObject({
+      min_price: '1', max_price: '500', min_volume: '20', min_confidence: 'Medium', strict_start: 'true',
+      search: 'oil', category: 'Oil', venue: 'trade', sort: 'value-asc', presence: 'observed', current_league: 'standard',
+    });
+    page.unbinding();
+  });
+  it('persists zoom and all filters on navigation without waiting for a debounce or mixing leagues', async () => {
+    const { api, container, session, settings } = workspace();
+    vi.spyOn(api, 'flips').mockResolvedValue(flipAnalysis());
+    const page = container.invoke(FlipAnalysis); await page.datasetChanged();
+    page.search = 'Golden'; page.minPrice = '10'; page.presence = 'unknown';
+    const viewport = { start: analysisPeriod().start! + 1200.5, end: analysisPeriod().end! - 1200.5 };
+    page.commitViewport(viewport);
+    session.historicalLeague = 'Mirage'; await page.datasetChanged();
+    await vi.waitFor(() => expect(settings.saveFlipPeriod).toHaveBeenCalled());
+    expect(vi.mocked(settings.saveFlipPeriod).mock.calls[0]).toEqual([
+      'Standard', expect.objectContaining({ viewport, filters: expect.objectContaining({ search: 'Golden', minPrice: '10', presence: 'unknown' }) }),
+    ]);
+    expect(page.search).toBe(''); expect(page.viewport).toBeNull(); expect(page.presence).toBe('');
+    page.unbinding();
+  });
+  it('renders provider-relative current trends with gaps and negative samples without inventing prices', async () => {
+    const { api, container } = workspace();
+    vi.spyOn(api, 'flips').mockResolvedValue(flipAnalysis());
+    const page = container.invoke(FlipAnalysis); await page.refresh();
+    await vi.waitFor(() => expect(page.currentAvailabilityLoading).toBe(false));
+    expect(page.currentTrends.divine?.paths).toHaveLength(2);
+    expect(page.currentTrends.divine?.paths[1]).toContain('L');
+    expect(page.currentAvailability.divine?.price).toBe('125.5');
+    page.unbinding();
+  });
+  it('checks the retained live league separately from historical ranking, only for displayed rows', async () => {
+    const { api, container, session } = workspace();
+    session.historicalLeague = 'Mirage';
+    const result = { ...flipAnalysis(), league: 'Mirage' };
+    vi.spyOn(api, 'flips').mockResolvedValue(result);
+    let finish!: (value: ReturnType<typeof currentAvailability>) => void;
+    vi.mocked(api.currentAvailability).mockImplementation(() => new Promise(resolve => { finish = resolve; }));
+    const page = container.invoke(FlipAnalysis); await page.refresh();
+    expect(page.result).toBe(result); expect(page.isLoading).toBe(false);
+    expect(page.currentAvailabilityLoading).toBe(true);
+    expect(api.currentAvailability).toHaveBeenCalledOnce();
+    expect(api.currentAvailability).toHaveBeenCalledWith('standard', result.rows, expect.any(AbortSignal));
+    finish(currentAvailability('standard', result.rows));
+    await vi.waitFor(() => expect(page.currentAvailabilityLoading).toBe(false));
+    expect(page.currentAvailability.divine?.listings).toBeNull();
+    expect(page.currentAvailability.oil?.listings).toBe(42);
+    expect(page.snapshot()).not.toHaveProperty('currentAvailability');
+    page.unbinding();
+  });
+  it.each(['search', 'filter', 'page', 'league', 'unbind'] as const)('cancels availability on %s and ignores late replies', async action => {
+    const { api, container, session } = workspace();
+    vi.spyOn(api, 'flips').mockImplementation(async league => ({ ...flipAnalysis(), league }));
+    const finishes: (() => void)[] = [];
+    vi.mocked(api.currentAvailability).mockImplementation((league, rows) => new Promise(resolve => {
+      finishes.push(() => resolve(currentAvailability(league, rows)));
+    }));
+    const page = container.invoke(FlipAnalysis); await page.refresh();
+    const signal = vi.mocked(api.currentAvailability).mock.calls[0]![2];
+    if (action === 'search') page.searchChangedByUser();
+    else if (action === 'filter') await page.refresh();
+    else if (action === 'page') await page.changePage(1);
+    else if (action === 'league') { session.historicalLeague = 'Mirage'; await page.datasetChanged(); }
+    else page.unbinding();
+    expect(signal.aborted).toBe(true);
+    finishes[0]!(); await Promise.resolve();
+    expect(page.currentAvailability).toEqual({});
+    page.unbinding();
+    for (const finish of finishes.slice(1)) finish();
+  });
+  it('shows availability failures independently without hiding historical ranking', async () => {
+    const { api, container } = workspace();
+    vi.spyOn(api, 'flips').mockResolvedValue(flipAnalysis());
+    const page = container.invoke(FlipAnalysis);
+    vi.mocked(api.currentAvailability).mockRejectedValueOnce(new Error('HTTP 503'));
+    await page.refresh();
+    await vi.waitFor(() => expect(page.currentAvailabilityError).toContain('HTTP 503'));
+    expect(page.result).not.toBeNull(); expect(page.error).toBe('');
+    vi.mocked(api.currentAvailability).mockResolvedValueOnce({ league: 'standard', items: [] });
+    await page.refresh();
+    await vi.waitFor(() => expect(page.currentAvailabilityError).toContain('Missing current availability'));
+    await page.refresh();
+    await vi.waitFor(() => expect(page.currentAvailabilityError).toBe(''));
+    page.unbinding();
+  });
   it('uses provider confidence labels, never fabricated confidence or GGG zeroes', () => {
     const { container } = workspace();
     const page = container.invoke(FlipAnalysis);
@@ -276,6 +422,87 @@ describe('Historical pages', () => {
     expect(restored.start).toBe(localInput(analysisPeriod('Mirage').start!));
     expect(restored.end).toBe(localInput(end));
     expect(flips.mock.calls.at(-1)?.[1]).toBe(analysisPeriod('Mirage').start!);
+  });
+  it('restores a file-backed period with a fresh session and keeps league selections separate', async () => {
+    const saved = new Map<string, { start: number; end: number }>();
+    for (const league of ['Standard', 'Mirage']) {
+      const { api, settings, container, session } = workspace();
+      session.historicalLeague = league;
+      vi.mocked(settings.loadFlipPeriod).mockImplementation(async name => saved.get(name) ?? null);
+      vi.mocked(settings.saveFlipPeriod).mockImplementation(async (name, period) => {
+        saved.set(name, period);
+      });
+      vi.spyOn(api, 'flips').mockResolvedValue(flipAnalysis());
+      const page = container.invoke(FlipAnalysis); await page.datasetChanged();
+      page.start = localInput(analysisPeriod(league).start! + 3600);
+      page.end = localInput(analysisPeriod(league).end! - 3600);
+      await page.savePeriod();
+      expect(saved.get(league)).toMatchObject({ start: analysisPeriod(league).start! + 3600, end: analysisPeriod(league).end! - 3600 });
+      page.unbinding();
+    }
+    const { api, settings, container, session } = workspace();
+    vi.mocked(settings.loadFlipPeriod).mockImplementation(async name => saved.get(name) ?? null);
+    const flips = vi.spyOn(api, 'flips').mockResolvedValue(flipAnalysis());
+    const page = container.invoke(FlipAnalysis); await page.datasetChanged();
+    expect(page.selectedStart).toBe(saved.get('Standard')!.start);
+    expect(page.selectedEnd).toBe(saved.get('Standard')!.end);
+    session.historicalLeague = 'Mirage'; await page.datasetChanged();
+    expect(flips.mock.calls.at(-1)?.slice(0, 3)).toEqual(['Mirage', saved.get('Mirage')!.start, saved.get('Mirage')!.end]);
+    expect(settings.saveFlipPeriod).not.toHaveBeenCalled();
+  });
+  it('clamps restored timestamps to refreshed bounds and rejects malformed saved settings visibly', async () => {
+    const { api, settings, container } = workspace();
+    const bounds = analysisPeriod();
+    vi.mocked(settings.loadFlipPeriod).mockResolvedValue({ start: bounds.start! - 3600, end: bounds.end! + 3600 });
+    vi.spyOn(api, 'flips').mockResolvedValue(flipAnalysis());
+    const page = container.invoke(FlipAnalysis); await page.datasetChanged();
+    expect(page.selectedStart).toBe(bounds.start); expect(page.selectedEnd).toBe(bounds.end);
+    page.unbinding();
+    const next = workspace();
+    vi.mocked(next.settings.loadFlipPeriod).mockResolvedValue({ start: 5, end: 2 });
+    vi.spyOn(next.api, 'flips').mockResolvedValue(flipAnalysis());
+    const invalid = next.container.invoke(FlipAnalysis); await invalid.datasetChanged();
+    expect(invalid.settingsError).toContain('invalid hour timestamps');
+    expect(invalid.selectedStart).toBe(bounds.start); expect(invalid.selectedEnd).toBe(bounds.end);
+    expect(next.settings.saveFlipPeriod).not.toHaveBeenCalled();
+  });
+  it('reports settings failures without hiding ranking and never saves invalid edits', async () => {
+    const { api, settings, container } = workspace();
+    vi.mocked(settings.loadFlipPeriod).mockRejectedValue(new Error('Cannot read settings'));
+    vi.spyOn(api, 'flips').mockResolvedValue(flipAnalysis());
+    const page = container.invoke(FlipAnalysis); await page.datasetChanged();
+    expect(page.settingsError).toContain('Cannot read settings'); expect(page.result).not.toBeNull();
+    page.start = 'invalid'; await page.savePeriod();
+    expect(settings.saveFlipPeriod).not.toHaveBeenCalled(); expect(page.settingsError).toContain('valid local date');
+    page.start = localInput(analysisPeriod().start! + 3600);
+    vi.mocked(settings.saveFlipPeriod).mockRejectedValueOnce(new Error('Disk is full'));
+    const log = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      await page.savePeriod();
+      expect(page.settingsError).toContain('Disk is full'); expect(page.result).not.toBeNull();
+      await page.savePeriod();
+      expect(page.settingsError).toBe('');
+    } finally { log.mockRestore(); }
+  });
+  it('serializes file writes across page instances and preserves exact band timestamps', async () => {
+    const { api, settings, container } = workspace();
+    vi.spyOn(api, 'flips').mockResolvedValue(flipAnalysis());
+    let finish!: () => void;
+    vi.mocked(settings.saveFlipPeriod).mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+    const page = container.invoke(FlipAnalysis); await page.datasetChanged();
+    const first = { start: analysisPeriod().start! + 3600, end: analysisPeriod().end! };
+    page.commitPeriod(first);
+    await vi.waitFor(() => expect(settings.saveFlipPeriod).toHaveBeenCalledOnce());
+    page.unbinding();
+    const next = container.invoke(FlipAnalysis);
+    const second = { start: first.start + 3600, end: first.end - 3600 };
+    next.start = localInput(second.start); next.end = localInput(second.end);
+    const save = next.savePeriod();
+    await Promise.resolve();
+    expect(settings.saveFlipPeriod).toHaveBeenCalledOnce();
+    finish(); await save;
+    expect(vi.mocked(settings.saveFlipPeriod).mock.calls.map(call => call[1]))
+      .toEqual(expect.arrayContaining([expect.objectContaining(first), expect.objectContaining(second)]));
   });
   it('reloads imported bounds on Analyze and clamps each endpoint while retaining filters', async () => {
     const { api, container } = workspace();

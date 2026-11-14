@@ -9,6 +9,7 @@
 * { box-sizing: border-box; }
 body { margin: 0; }
 market-app { display: block; }
+.app-header nav .dev-only-tab { color: #ef89c8; }
 gem-flipping, settings-page { display: contents; }
 au-viewport, current-prices { display: flex; flex: 1; min-height: 0; }
 dump-manager { display: flex; flex: 1; min-height: 0; }
@@ -30,6 +31,7 @@ period-band { display: block; min-width: 0; width: 100%; }
 .period-background { fill: #161616; cursor: grab; }
 .period-markers line { stroke: #97b6c8; stroke-width: 1; vector-effect: non-scaling-stroke; }
 .period-markers .day { stroke: #d7bc85; stroke-width: 2; }
+.period-reference { stroke: #ef89c8; stroke-width: 3; vector-effect: non-scaling-stroke; pointer-events: stroke; }
 .period-band-selection { fill: #79b4d44d; stroke: #79b4d4; cursor: grab; }
 .period-band-handle { fill: #9accea; stroke: transparent; stroke-width: 28; vector-effect: non-scaling-stroke; cursor: ew-resize; }
 .period-band-handle:focus { fill: #ffcf75; outline: none; stroke: #fff; stroke-width: 2; }
@@ -37,12 +39,18 @@ period-band { display: block; min-width: 0; width: 100%; }
 .period-caption small { overflow-wrap: anywhere; }
 .historical-page .table-scroll { flex: none; overflow: auto; max-width: 100%; }
 .historical-page td small { display: block; color: #aaa; }
+.historical-page .flip-results { width: auto; }
+.flip-results > thead > tr > th, .flip-results > tbody > tr > td { padding: 8px 6px; }
 .flip-item-name { max-width: min(32rem, 60vw); white-space: normal; overflow-wrap: anywhere; text-align: left; }
-.flip-sparkline { display: block; width: 120px; height: 36px; color: #a9cbef; }
-.flip-sparkline path { fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; }
-.flip-sparkline circle { fill: currentColor; }
+.flip-sparkline, .current-league-sparkline { display: block; width: 120px; height: 36px; color: #a9cbef; }
+.flip-sparkline path, .current-league-sparkline path { fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; }
+.flip-sparkline circle, .current-league-sparkline circle { fill: currentColor; }
 .historical-page .flip-chart-cell { min-width: 120px; max-width: 240px; white-space: normal; overflow-wrap: anywhere; }
 .historical-page .flip-chart-cell .warning { color: #e6b96b; }
+.historical-page .flip-current-availability { min-width: 150px; white-space: normal; }
+.current-league-summary { white-space: nowrap; }
+.current-league-quote { display: flex; width: max-content; align-items: center; gap: 8px; }
+.current-league-quote .current-league-sparkline { flex-shrink: 0; }
 .historical-page article { min-width: 0; }
 .historical-page ul, .historical-page ol { padding-left: 24px; }
 .historical-page a { color: #a9cbef; }
@@ -238,3 +246,10 @@ footer { display: flex; justify-content: center; align-items: center; gap: 16px;
   .detail-value { font-size: 18px; }
   .archive-list { grid-template-columns: minmax(0, 1fr); }
 }
+.economy .current-comparison-line, .economy .current-comparison-volume { stroke: #f4a261; fill: none; }
+.economy .current-comparison-line { stroke-width: 2; }
+.economy .current-comparison-dots { fill: #f4a261; stroke: none; }
+.economy .current-comparison-volume { stroke-width: 3; opacity: .65; }
+.comparison-legend span { margin-right: .75rem; }
+.comparison-legend .current-comparison { color: #f4a261; }
+.ggg-trend path { vector-effect: non-scaling-stroke; }

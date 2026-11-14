@@ -12,6 +12,7 @@ function workspace() {
     economyOverview(category, source, league, date));
   const container = DI.createContainer().register(Registration.instance(MarketApi, api));
   const app = container.invoke(CurrentPrices);
+  app.source = 'exchange';
   app.categories = economyCategories();
   app.leagues = [{ id: 'Standard', name: 'Standard', live: true }, { id: 'Ancestors', name: 'Ancestors', live: true, archived: true }];
   app.league = 'Standard';
@@ -19,6 +20,36 @@ function workspace() {
 }
 
 describe('Current prices page', () => {
+  it('defaults exchange categories to GGG, keeps latest prices outside the brush, and does not request ninja data', async () => {
+    const { app, api } = workspace();
+    app.source = 'ggg';
+    const overview = { ...economyOverview(), source: 'ggg' as const };
+    const line = overview.lines[0]!;
+    const ggg = vi.spyOn(api, 'gggPrices').mockResolvedValue({
+      overview, launch: 0, current_launch: 86400, current_league: 'Standard', warnings: [], trends: {
+        [line.id]: { selected: [0, 3600, 7200].map(time => ({ time, price: '10', volume: '20' })), current: [] },
+      },
+    });
+    await app.load();
+    expect(api.economy).not.toHaveBeenCalled();
+    expect(api.economyDates).not.toHaveBeenCalled();
+    await app.openItem(line);
+    const price = app.price(line);
+    app.setPeriodRange(0, 1);
+    expect(app.price(line)).toBe(price);
+    expect(app.series[0]?.volume.max).toBe(20);
+    expect(ggg).toHaveBeenLastCalledWith('Standard', 'Currency', 'Standard', '', expect.any(AbortSignal), line.id);
+  });
+
+  it('surfaces GGG failures without substituting ninja prices', async () => {
+    const { app, api } = workspace();
+    app.source = 'ggg';
+    vi.spyOn(api, 'gggPrices').mockRejectedValue(new Error('GGG HTTP 503'));
+    await app.load();
+    expect(app.error).toContain('GGG HTTP 503');
+    expect(app.overview).toBeNull();
+    expect(api.economy).not.toHaveBeenCalled();
+  });
   it('refreshes the saved gem feed as well as current prices and invalidates cached gem data', async () => {
     const { app, api } = workspace();
     const capture = vi.spyOn(api, 'refreshGemAnalysis').mockResolvedValue(gemAnalysis());
@@ -296,6 +327,7 @@ describe('Current prices page', () => {
   it('uses archived stash data without changing live selection or forcing refresh', async () => {
     const { app, api } = workspace();
     app.dataset = 'Ancestors';
+    app.source = 'stash';
     app.date = '2026-11-11';
     await app.load(true);
     expect(app.source).toBe('stash');

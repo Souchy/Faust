@@ -10,6 +10,33 @@ use sqlx::Row;
 use crate::{SqliteStore, StoreError};
 
 impl SqliteStore {
+    pub async fn save_league_launch(
+        &self,
+        league: &str,
+        start: i64,
+        source: &str,
+    ) -> Result<(), StoreError> {
+        sqlx::query(
+            "INSERT INTO league_launches (league,start,source) VALUES (?,?,?)
+            ON CONFLICT(league) DO UPDATE SET start=excluded.start,source=excluded.source",
+        )
+        .bind(league)
+        .bind(start)
+        .bind(source)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn league_launch(&self, league: &str) -> Result<Option<i64>, StoreError> {
+        Ok(
+            sqlx::query_scalar("SELECT start FROM league_launches WHERE league=?")
+                .bind(league)
+                .fetch_optional(&self.pool)
+                .await?,
+        )
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub async fn analysis_price_samples(
         &self,
@@ -205,6 +232,11 @@ impl SqliteStore {
         if tightened {
             bounds_source = "observed";
             warnings = vec!["Official league datetimes are unavailable. Bounds use the observed active exchange window where fully fetched outer hours confirm no traded markets; empty imported hours do not extend it. Individual items can begin trading later or stop earlier.".into()];
+        }
+        if let Some(launch) = self.league_launch(league).await? {
+            start = Some(launch);
+            bounds_source = "published";
+            warnings = vec!["Start uses published league launch metadata in UTC; the end uses saved coverage. Observations may begin later than launch. Missing prices are not interpolated.".into()];
         }
         hours.retain(|hour| {
             start.is_none_or(|bound| *hour >= bound) && end.is_none_or(|bound| *hour <= bound)
@@ -762,6 +794,29 @@ mod tests {
             .unwrap();
         let gap = store.analysis_period("Test").await.unwrap();
         assert_eq!((gap.start, gap.end), (Some(start), Some(last)));
+        let launch = start + 18 * 3600;
+        store
+            .save_league_launch("Test", launch, "PoE Wiki")
+            .await
+            .unwrap();
+        let published = store.analysis_period("Test").await.unwrap();
+        assert_eq!((published.start, published.end), (Some(launch), Some(last)));
+        assert_eq!(published.bounds_source, "published");
+        assert_eq!(published.hours, vec![first, last]);
+        let coverage = store.ggg_coverage("Test", launch, last).await.unwrap();
+        assert_eq!(
+            coverage.completed_hours.len() as u64,
+            coverage.expected_hours
+        );
+        assert!(store.ggg_markets("Test", launch).await.unwrap().is_empty());
+        drop(store);
+        let reopened = SqliteStore::connect(directory.path().join("active-window.sqlite3"))
+            .await
+            .unwrap();
+        assert_eq!(
+            reopened.analysis_period("Test").await.unwrap().start,
+            Some(launch)
+        );
     }
 
     #[tokio::test]

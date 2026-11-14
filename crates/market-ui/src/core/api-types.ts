@@ -92,6 +92,7 @@ export interface GemAnalysisOverview {
 }
 
 export type EconomySource = 'exchange' | 'stash';
+export type PriceSource = EconomySource | 'ggg';
 
 export interface EconomyCategory {
   id: string;
@@ -133,7 +134,7 @@ export interface EconomyLine {
 export interface EconomyOverview {
   league: string;
   category: string;
-  source: EconomySource;
+  source: PriceSource;
   fetched_at: string;
   quote_currency: string;
   rates: Record<string, string>;
@@ -144,13 +145,24 @@ export interface EconomyHistoryPoint {
   date: string;
   price: string;
   currency: string;
-  granularity: 'daily' | 'snapshot';
+  granularity: 'daily' | 'snapshot' | 'hourly';
   volume?: string | null;
 }
 
 export interface EconomyHistory {
   points: EconomyHistoryPoint[];
   coverage: { start: string | null; end: string | null };
+}
+export interface GggPriceSample {
+  time: number; price: string | null; volume: string | null; original_time?: number;
+  granularity?: EconomyHistoryPoint['granularity'];
+}
+export interface GggPriceTrend { selected: GggPriceSample[]; current: GggPriceSample[] }
+export interface GggPrices {
+  overview: EconomyOverview; launch: number; current_launch: number; current_league: string;
+  trends: Record<string, GggPriceTrend>; warnings: string[];
+  collection?: GggImportJob | null; collection_error?: string | null;
+  dates?: string[];
 }
 
 export interface EconomyArchive {
@@ -207,7 +219,19 @@ export interface FlipRow {
   history_category?: string | null; history_source?: string | null; history_item?: string | null;
   start_confidence?: string | null; end_confidence?: string | null;
   history_archive?: string | null; history_granularity?: string | null;
+  item_identity?: FlipItemIdentity | null;
 }
+export interface FlipItemIdentity {
+  name: string; variant?: string | null; base_type?: string | null; links?: number | null;
+  gem_level?: number | null; gem_quality?: number | null; corrupted?: boolean | null;
+  map_tier?: number | null; cluster_level?: number | null;
+}
+export interface CurrentItemAvailability {
+  id: string; status: 'observed' | 'not_observed' | 'unknown' | 'ambiguous';
+  price: string | null; listings: number | null; fetched_at: string | null; source: string | null; detail: string;
+  sparkline: (string | null)[];
+}
+export interface CurrentAvailability { league: string; items: CurrentItemAvailability[] }
 export interface FlipSparklinePoint { time: number; price: string | null }
 export interface FlipSparklineSeries { id: string; points: FlipSparklinePoint[]; warnings: string[] }
 export interface FlipSparklines { series: FlipSparklineSeries[] }
@@ -218,8 +242,21 @@ export interface FlipAnalysis {
 }
 export interface AnalysisPeriod {
   league: string; start: number | null; end: number | null;
-  bounds_source: 'official' | 'archive' | 'observed' | 'unavailable';
+  bounds_source: 'official' | 'published' | 'archive' | 'observed' | 'unavailable';
   hours: number[]; days: string[]; warnings: string[];
+}
+export interface LeagueStart {
+  league: string; start: number | null; approximate: boolean;
+}
+export interface FlipFilters {
+  minPrice: string; maxPrice: string; minVolume: string; minConfidence: string; strictStart: boolean;
+  search: string; category: string; venue: string; sort: string; presence: string;
+}
+export interface FlipViewport { start: number; end: number }
+export interface FlipPeriodSelection {
+  start: number; end: number;
+  viewport?: FlipViewport | null;
+  filters?: FlipFilters;
 }
 export interface ArbitrageLoop {
   id: string; path: string[]; rates: string[]; market_ids: string[]; return_percent: string;

@@ -7,7 +7,7 @@ use tokio::{sync::oneshot, task::JoinHandle};
 pub struct Backend {
     shutdown: Option<oneshot::Sender<()>>,
     server: JoinHandle<io::Result<()>>,
-    collectors: [JoinHandle<()>; 2],
+    collectors: [JoinHandle<()>; 3],
     #[cfg(test)]
     address: SocketAddr,
 }
@@ -46,6 +46,7 @@ impl Backend {
                 .await
         });
         let collectors = [
+            tokio::spawn(market_service::ggg::collect(state.clone(), selected.clone())),
             tokio::spawn(run_periodic_gem_collector(state.clone(), selected.clone())),
             tokio::spawn(economy::collect(state, selected)),
         ];

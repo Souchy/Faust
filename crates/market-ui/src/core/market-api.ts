@@ -1,7 +1,9 @@
 import type {
+  GggPrices,
+  LeagueStart,
   CurrentExchangePriceOverview, ExchangeMarketSnapshot, GemAnalysisOverview, GemMarketOverview,
   LeagueOption, ServiceStatus, EconomyCategory, EconomyLeague, EconomyOverview, EconomySource,
-  EconomyHistory, EconomyArchive, GggOverview, GggCoverage, GggHistory, GggImportJob, FlipAnalysis, FlipRow, FlipSparklines, ArbitrageAnalysis, AnalysisPeriod,
+  EconomyHistory, EconomyArchive, GggOverview, GggCoverage, GggHistory, GggImportJob, FlipAnalysis, FlipRow, FlipSparklines, CurrentAvailability, ArbitrageAnalysis, AnalysisPeriod,
 } from './api-types';
 
 export class MarketApi {
@@ -123,12 +125,30 @@ export class MarketApi {
   analysisPeriod(league: string, signal: AbortSignal): Promise<AnalysisPeriod> {
     return this.request(`/api/v1/analysis/period?${new URLSearchParams({ league })}`, signal);
   }
+  leagueStart(league: string, signal: AbortSignal): Promise<LeagueStart> {
+    return this.request(`/api/v1/analysis/league-start?${new URLSearchParams({ league })}`, signal);
+  }
+  gggPrices(league: string, category: string, currentLeague: string, date: string, signal: AbortSignal, item?: string): Promise<GggPrices> {
+    const query = new URLSearchParams({ league, category, current_league: currentLeague, date });
+    if (item) query.set('item', item);
+    return this.request(`/api/v1/ggg/prices?${query}`, signal);
+  }
+  economyComparison(league: string, category: string, source: EconomySource, currentLeague: string, date: string,
+    signal: AbortSignal, item?: string): Promise<GggPrices> {
+    const query = new URLSearchParams({ league, category, source, current_league: currentLeague, date });
+    if (item) query.set('item', item);
+    return this.request(`/api/v1/economy/comparison?${query}`, signal);
+  }
   flips(league: string, start: number, end: number, filters: Record<string, string>, signal: AbortSignal): Promise<FlipAnalysis> {
     return this.request(`/api/v1/analysis/flips?${new URLSearchParams({ league, start: String(start), end: String(end), ...filters })}`, signal);
   }
   async flipSparklines(league: string, start: number, end: number, rows: FlipRow[], signal: AbortSignal): Promise<FlipSparklines> {
     if (rows.length > 100) throw new Error('Sparkline batches support at most 100 displayed rows.');
     return this.request('/api/v1/analysis/sparklines', signal, { league, start, end, rows });
+  }
+  async currentAvailability(league: string, rows: FlipRow[], signal: AbortSignal): Promise<CurrentAvailability> {
+    if (rows.length > 100) throw new Error('Current availability batches support at most 100 displayed rows.');
+    return this.request('/api/v1/analysis/current-availability', signal, { league, rows });
   }
   arbitrage(league: string, hour: number, minVolume: string | undefined, signal: AbortSignal): Promise<ArbitrageAnalysis> {
     const query = new URLSearchParams({ league, hour: String(hour) });

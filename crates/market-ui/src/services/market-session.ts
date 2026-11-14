@@ -1,6 +1,7 @@
 import { resolve } from 'aurelia';
-import type { EconomyLeague, LeagueOption } from '../core/api-types';
+import type { EconomyLeague, FlipPeriodSelection, LeagueOption } from '../core/api-types';
 import { MarketApi } from '../core/market-api';
+import { ClientSettings } from './client-settings';
 import type { CurrentPrices } from '../pages/current-prices/current-prices';
 import type { GemFlipping } from '../pages/gem-flipping/gem-flipping';
 import type { SettingsPage } from '../pages/settings/settings-page';
@@ -12,8 +13,10 @@ export type MarketPage = 'prices' | 'gems' | 'settings' | 'exchange' | 'flips' |
 
 export class MarketSession {
   private readonly api = resolve(MarketApi);
+  private readonly clientSettings = resolve(ClientSettings);
   private request: AbortController | null = null;
   private pending: Promise<void> | null = null;
+  private periodSave: Promise<void> = Promise.resolve();
   leagues: LeagueOption[] = [];
   datasets: EconomyLeague[] = [];
   selectedLeagueId = '';
@@ -36,6 +39,22 @@ export class MarketSession {
 
   get selectedDataset(): string {
     return this.historicalLeague ? `archive:${this.historicalLeague}` : this.selectedLeagueId;
+  }
+
+  saveFlipPeriod(league: string, period: FlipPeriodSelection): Promise<void> {
+    const save = this.periodSave.then(async () => {
+      await this.clientSettings.saveFlipPeriod(league, period);
+    });
+    this.periodSave = save.catch((error: unknown) => {
+      console.error('Unable to persist Flip analysis period', error);
+    });
+    return save;
+  }
+
+  async loadFlipPeriod(league: string, signal: AbortSignal): Promise<FlipPeriodSelection | null> {
+    await this.periodSave;
+    signal.throwIfAborted();
+    return this.clientSettings.loadFlipPeriod(league);
   }
 
   get archivedDatasets(): EconomyLeague[] {

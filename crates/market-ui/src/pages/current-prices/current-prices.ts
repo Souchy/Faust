@@ -1,6 +1,6 @@
 import { resolve } from 'aurelia';
 import type {
-  EconomyCategory, EconomyHistory, EconomyLeague, EconomyLine, EconomyOverview, EconomySource,
+  EconomyCategory, EconomyHistory, EconomyLeague, EconomyLine, EconomyOverview, EconomySource, PriceSource, GggPrices,
 } from '../../core/api-types';
 import { MarketApi } from '../../core/market-api';
 import { MarketSession } from '../../services/market-session';
@@ -8,6 +8,7 @@ import {
   formatNumber, historyDate, historySeries, metadataText, number, quotedPrice, sortedLines, sparkSegments, variantLabel,
   type ChartPoint, type ChartSeries, type EconomySort, type PriceUnit,
 } from '../../core/economy';
+import { alignedSamples, comparisonChart, historyPoints, type ComparisonChart } from '../../core/ggg-price-charts';
 
 export class CurrentPrices {
   private readonly api = resolve(MarketApi);
@@ -22,7 +23,12 @@ export class CurrentPrices {
   get leagues(): EconomyLeague[] { return this.session.datasets; }
   set leagues(value: EconomyLeague[]) { this.session.datasets = value; }
   category = 'Currency';
-  source: EconomySource = 'exchange';
+  source: PriceSource = 'ggg';
+  gggData: GggPrices | null = null;
+  gggHistory: GggPrices | null = null;
+  tableCharts: Record<string, ComparisonChart> = {};
+  private refreshTimer: ReturnType<typeof setInterval> | null = null;
+  private preferredExchangeSource: PriceSource = 'ggg';
   get dataset(): string { return this.session.historicalLeague; }
   set dataset(value: string) { this.session.historicalLeague = value; }
   get date(): string { return this.session.historicalDate; }
@@ -50,6 +56,7 @@ export class CurrentPrices {
   history: EconomyHistory | null = null;
   historyLoading = false;
   historyError = '';
+  comparisonError = '';
   historyDays = '';
   historyLimit = 100;
   periodStart = 0;
@@ -89,9 +96,14 @@ export class CurrentPrices {
     this.active = true;
     if (!this.overview || this.loadedContext !== this.contextKey) void this.initialize();
     else if (this.selectedItem && !this.history && !this.historyError) void this.loadHistory();
+    this.refreshTimer = setInterval(() => {
+      if (this.source === 'ggg' && !this.isLoading) void this.reloadGgg();
+    }, 60_000);
   }
 
   unbinding(): void {
+    if (this.refreshTimer) clearInterval(this.refreshTimer);
+    this.refreshTimer = null;
     this.active = false;
     this.request?.abort();
     this.request = null;
@@ -120,6 +132,8 @@ export class CurrentPrices {
         history: this.history, historyError: this.historyError, historyDays: this.historyDays,
         historyLimit: this.historyLimit, periodStart: this.periodStart, periodEnd: this.periodEnd,
         customPeriod: this.customPeriod,
+        gggData: this.gggData, gggHistory: this.gggHistory, tableCharts: this.tableCharts,
+        preferredExchangeSource: this.preferredExchangeSource,
       },
     };
   }
@@ -170,10 +184,12 @@ export class CurrentPrices {
   get historical(): boolean {
     return !!this.date || !!this.dataset;
   }
-  get availableSources(): EconomySource[] {
-    return this.dataset
-      ? ['stash'] : this.currentCategory?.sources ?? [];
+  get availableSources(): PriceSource[] {
+    const sources: EconomySource[] = this.dataset ? ['stash'] : this.currentCategory?.sources ?? [];
+    return this.currentCategory?.sources.includes('exchange') ? ['ggg', ...sources] : sources;
   }
+  get sourceLabel(): string { return this.source === 'ggg' ? 'GGG hourly trades' : `poe.ninja ${this.source} estimates`; }
+  get warnings(): string[] { return this.gggData?.warnings ?? []; }
   get quoteLabel(): string {
     return this.unit === 'native' ? this.overview?.quote_currency ?? '' : this.unit === 'chaos' ? 'Chaos Orb' : 'Divine Orb';
   }
@@ -219,14 +235,33 @@ export class CurrentPrices {
   }
   showMore(): void { this.limit += 100; this.rows = this.filteredLines.slice(0, this.limit); }
   get historyDates(): string[] {
+    const trend = this.selectedItem ? this.gggHistory?.trends[this.selectedItem.id] : undefined;
+    if (trend && this.gggHistory) {
+      const aligned = alignedSamples(this.gggHistory, trend);
+      return [...new Set([...aligned.selected, ...aligned.current].map(point => new Date(point.time * 1000).toISOString()))].sort();
+    }
     return [...new Set((this.history?.points ?? []).map((point) => point.date))].sort();
   }
   get periodPoints() {
     const dates = this.historyDates;
     return (this.history?.points ?? []).filter((point) =>
-      point.date >= (dates[this.periodStart] ?? '') && point.date <= (dates[this.periodEnd] ?? ''));
+      Date.parse(point.date) >= Date.parse(dates[this.periodStart] ?? '') && Date.parse(point.date) <= Date.parse(dates[this.periodEnd] ?? ''));
   }
-  get series() { return historySeries(this.periodPoints); }
+  get series(): ComparisonChart[] {
+    if (this.gggHistory && this.selectedItem
+      && this.gggHistory.trends[this.selectedItem.id]) {
+      const trend = this.gggHistory.trends[this.selectedItem.id];
+      if (!trend) return [];
+      const aligned = alignedSamples(this.gggHistory, trend);
+      const dates = this.historyDates;
+      const start = Date.parse(dates[this.periodStart] ?? '') / 1000, end = Date.parse(dates[this.periodEnd] ?? '') / 1000;
+      const inside = (point: { time: number }) => point.time >= start && point.time <= end;
+      const chart = comparisonChart({ selected: aligned.selected.filter(inside), current: aligned.current.filter(inside) },
+        this.gggHistory.launch, [this.browsingLeague, this.league]);
+      return chart ? [chart] : [];
+    }
+    return historySeries(this.periodPoints).map(chart => ({ ...chart, currentSegments: [], currentDots: '', currentVolume: '' }));
+  }
   get navigatorPath(): string { return this.chartPath(historySeries(this.history?.points ?? [])[0]?.segments ?? []); }
   get historyRows() { return [...this.periodPoints].reverse().slice(0, this.historyLimit); }
   hoverHistory(chart: ChartSeries, event: PointerEvent): void {
@@ -344,6 +379,7 @@ export class CurrentPrices {
   }
 
   async refresh(): Promise<void> {
+    if (this.source === 'ggg') { await this.reloadGgg(); return; }
     if (!this.dataset) {
       const request = this.controller();
       this.isLoading = true;
@@ -374,9 +410,25 @@ export class CurrentPrices {
     this.isLoading = true;
     this.error = this.dateError = '';
     this.limit = 100;
-    if (!this.availableSources.includes(this.source)) this.source = this.availableSources[0] ?? 'stash';
+    if (!this.availableSources.includes(this.source)) this.source = this.source !== 'ggg' && this.availableSources.includes('stash')
+      ? 'stash' : this.availableSources[0] ?? 'stash';
+    this.gggData = null; this.gggHistory = null; this.tableCharts = {}; this.comparisonError = '';
     const timeout = setTimeout(() => request.abort(new Error('Economy request timed out.')), 60_000);
     try {
+      if (this.source === 'ggg') {
+        const requestedDate = this.date;
+        let data = await this.api.gggPrices(this.browsingLeague, this.category, this.league, requestedDate, request.signal);
+        if (this.request !== request) return;
+        this.dates = data.dates ?? [];
+        if (this.dataset && this.dates.length && !this.dates.includes(this.date)) {
+          this.date = this.dates[0]!;
+          if (requestedDate) data = await this.api.gggPrices(this.browsingLeague, this.category, this.league, this.date, request.signal);
+          if (this.request !== request) return;
+        }
+        this.applyGgg(data);
+        this.loadedContext = this.contextKey;
+        return;
+      }
       const dates = await this.api.economyDates(this.browsingLeague, this.category, this.source, request.signal);
       if (this.request !== request) return;
       this.dates = dates;
@@ -387,6 +439,14 @@ export class CurrentPrices {
       const overview = await this.api.economy(this.browsingLeague, this.category, this.source, this.date, request.signal,
         refresh && !this.historical);
       if (this.request === request) { this.overview = overview; this.loadedContext = this.contextKey; this.updateLines(); }
+      if (this.request === request && this.historical) {
+        try {
+          const data = await this.api.economyComparison(this.browsingLeague, this.category, this.source, this.league, this.date, request.signal);
+          if (this.request === request) this.applyComparison(data);
+        } catch (error: unknown) {
+          if (this.request === request && !request.signal.aborted) this.comparisonError = `Unable to load league comparison: ${this.message(error)}`;
+        }
+      }
     } catch (error: unknown) {
       if (this.request === request) this.error = `Unable to load ${this.currentCategory?.name ?? this.category}: ${this.message(error)}`;
     } finally {
@@ -398,10 +458,47 @@ export class CurrentPrices {
   selectCategory(category: string): void {
     if (this.category === category) return;
     this.category = category;
+    this.source = this.currentCategory?.sources.includes('exchange') ? this.preferredExchangeSource : 'stash';
     this.clearFilters();
     void this.load();
   }
-  reloadCategory(): void { this.clearFilters(); void this.load(); }
+  private applyGgg(data: GggPrices): void {
+    this.overview = data.overview;
+    this.applyComparison(data);
+    this.updateLines();
+  }
+
+  private applyComparison(data: GggPrices): void {
+    this.gggData = data;
+    this.tableCharts = {};
+    for (const [id, trend] of Object.entries(data.trends)) {
+      const chart = comparisonChart(alignedSamples(data, trend), data.launch, [this.browsingLeague, this.league]);
+      if (chart) this.tableCharts[id] = chart;
+    }
+  }
+
+  private async reloadGgg(): Promise<void> {
+    const request = this.controller();
+    this.error = '';
+    try {
+      const data = await this.api.gggPrices(this.browsingLeague, this.category, this.league, this.date, request.signal);
+      if (this.request !== request || this.source !== 'ggg') return;
+      this.applyGgg(data);
+      if (this.selectedItem) {
+        const refreshed = data.overview.lines.find(line => line.id === this.selectedItem?.id);
+        if (refreshed) this.selectedItem = refreshed;
+        else { this.closeDetail(); return; }
+        await this.loadHistory();
+      }
+    } catch (error: unknown) {
+      if (this.request === request && !request.signal.aborted) this.error = `Unable to refresh GGG prices: ${this.message(error)}`;
+    }
+  }
+  reloadCategory(): void {
+    this.source = this.currentCategory?.sources.includes('exchange') ? this.preferredExchangeSource : 'stash';
+    this.clearFilters();
+    void this.load();
+  }
   setFacet(field: 'gemLevel' | 'gemQuality' | 'links' | 'mapTier', value: string): void {
     this[field] = value;
     this.limit = 100;
@@ -410,8 +507,9 @@ export class CurrentPrices {
   selectDataset(dataset: string): void {
     this.dataset = dataset;
   }
-  selectSource(source: EconomySource): void {
+  selectSource(source: PriceSource): void {
     this.source = source;
+    if (this.currentCategory?.sources.includes('exchange')) this.preferredExchangeSource = source;
     this.date = '';
     void this.load();
   }
@@ -454,6 +552,7 @@ export class CurrentPrices {
     this.detailRequest?.abort();
     this.selectedItem = null;
     this.history = null;
+    this.gggHistory = null;
     this.historyError = '';
   }
   async loadHistory(): Promise<void> {
@@ -463,12 +562,39 @@ export class CurrentPrices {
     const request = new AbortController();
     this.detailRequest = request;
     this.history = null;
+    this.gggHistory = null;
     this.historyError = '';
     this.historyLoading = true;
     try {
+      if (this.source === 'ggg') {
+        const data = await this.api.gggPrices(this.browsingLeague, this.category, this.league, this.date, request.signal, this.selectedItem.id);
+        if (this.detailRequest !== request) return;
+        this.gggHistory = data;
+        const trend = data.trends[this.selectedItem.id];
+        const aligned = trend ? alignedSamples(data, trend) : { selected: [], current: [] };
+        const points = historyPoints(aligned.selected);
+        this.history = { points, coverage: { start: points[0]?.date ?? null, end: points.at(-1)?.date ?? null } };
+        this.restoreHistoryRange();
+        return;
+      }
       const history = await this.api.economyHistory(this.browsingLeague, this.category, this.source,
         this.selectedItem.id, '', request.signal);
       if (this.detailRequest === request) { this.history = history; this.restoreHistoryRange(); }
+      if (this.detailRequest === request && this.historical) {
+        try {
+          const data = await this.api.economyComparison(this.browsingLeague, this.category, this.source, this.league, this.date, request.signal, this.selectedItem.id);
+          if (this.detailRequest !== request) return;
+          const trend = data.trends[this.selectedItem.id];
+          if (trend && (trend.selected.length || trend.current.length)) {
+            this.gggHistory = data;
+            const aligned = alignedSamples(data, trend);
+            this.history = { ...history, points: historyPoints(aligned.selected) };
+            this.restoreHistoryRange();
+          }
+        } catch (error: unknown) {
+          if (this.detailRequest === request && !request.signal.aborted) this.comparisonError = `Unable to load league comparison: ${this.message(error)}`;
+        }
+      }
     } catch (error: unknown) {
       if (this.detailRequest === request && !request.signal.aborted) this.historyError = `Unable to load price history: ${this.message(error)}`;
     } finally {

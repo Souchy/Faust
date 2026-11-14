@@ -9,8 +9,8 @@ use axum::{
 use chrono::{DateTime, Utc};
 use market_core::{
     analysis::{
-        Arbitrage, ArbitrageLoop, Excluded, FlipRow, Flips, Observation, PairAlternative, Period,
-        SparkPoint, Sparkline, Sparklines,
+        Arbitrage, ArbitrageLoop, CurrentAvailability, CurrentItem, Excluded, FlipItemIdentity,
+        FlipRow, Flips, Observation, PairAlternative, Period, SparkPoint, Sparkline, Sparklines,
     },
     economy,
     ggg::{Item, Market},
@@ -20,14 +20,30 @@ use serde::Deserialize;
 
 use crate::ServiceState;
 
+pub mod current_prices;
+pub(crate) mod league_start;
+
 const CHAOS: &str = "Metadata/Items/Currency/CurrencyRerollRare";
 type ApiError = (StatusCode, String);
 
 pub fn routes() -> Router<ServiceState> {
     Router::new()
         .route("/api/v1/analysis/flips", get(flips))
+        .route("/api/v1/ggg/prices", get(current_prices::prices))
+        .route(
+            "/api/v1/economy/comparison",
+            get(current_prices::ninja_prices),
+        )
         .route("/api/v1/analysis/period", get(period))
+        .route(
+            "/api/v1/analysis/league-start",
+            get(league_start::league_start),
+        )
         .route("/api/v1/analysis/sparklines", post(sparklines))
+        .route(
+            "/api/v1/analysis/current-availability",
+            post(current_availability),
+        )
         .route("/api/v1/analysis/arbitrage", get(arbitrage))
 }
 
@@ -124,6 +140,8 @@ struct FlipQuery {
     search: Option<String>,
     category: Option<String>,
     venue: Option<String>,
+    presence: Option<String>,
+    current_league: Option<String>,
 }
 
 fn page_size() -> usize {
@@ -136,6 +154,145 @@ struct SparkQuery {
     start: i64,
     end: i64,
     rows: Vec<FlipRow>,
+}
+
+#[derive(Deserialize)]
+struct AvailabilityQuery {
+    league: String,
+    rows: Vec<FlipRow>,
+}
+
+async fn current_availability(
+    State(state): State<ServiceState>,
+    Json(query): Json<AvailabilityQuery>,
+) -> Result<Json<CurrentAvailability>, ApiError> {
+    market_core::ggg::validate_league(&query.league)
+        .map_err(|error| (StatusCode::BAD_REQUEST, error))?;
+    let mut ids = HashSet::new();
+    if query.rows.len() > 100
+        || query.rows.iter().any(|row| {
+            row.id.len() > 2048
+                || !ids.insert(&row.id)
+                || row.category.len() > 64
+                || !row.category.bytes().all(|c| c.is_ascii_alphanumeric())
+        })
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Choose at most 100 unique displayed items with valid categories.".into(),
+        ));
+    }
+    let categories = query
+        .rows
+        .iter()
+        .map(|row| row.category.clone())
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    // Read saved live overviews in one query; never trigger provider requests for each result.
+    let overviews = state
+        .economy_store
+        .current_economies(&query.league, &categories)
+        .await
+        .map_err(failure)?;
+    let indexed = index_current(&overviews);
+    let items = query
+        .rows
+        .iter()
+        .map(|row| current_item(row, indexed.get(row.category.as_str())))
+        .collect();
+    Ok(Json(CurrentAvailability {
+        league: query.league,
+        items,
+    }))
+}
+
+#[derive(Default)]
+struct CurrentCategory<'a> {
+    latest: Option<&'a economy::Overview>,
+    items: HashMap<FlipItemIdentity, Vec<(&'a economy::Overview, &'a economy::Line)>>,
+}
+
+fn index_current(overviews: &[economy::Overview]) -> HashMap<&str, CurrentCategory<'_>> {
+    let mut sorted = overviews.iter().collect::<Vec<_>>();
+    sorted.sort_by(|a, b| {
+        b.fetched_at
+            .cmp(&a.fetched_at)
+            .then_with(|| a.source.cmp(&b.source))
+    });
+    let mut categories: HashMap<&str, CurrentCategory<'_>> = HashMap::new();
+    for overview in sorted {
+        let category = categories.entry(&overview.category).or_default();
+        category.latest.get_or_insert(overview);
+        for line in &overview.lines {
+            category
+                .items
+                .entry(FlipItemIdentity::from_line(&overview.category, line))
+                .or_default()
+                .push((overview, line));
+        }
+    }
+    categories
+}
+
+fn current_item(row: &FlipRow, category: Option<&CurrentCategory<'_>>) -> CurrentItem {
+    let mut result = CurrentItem {
+        id: row.id.clone(),
+        status: "unknown".into(),
+        price: None,
+        listings: None,
+        fetched_at: None,
+        source: None,
+        detail: "No saved current-league poe.ninja snapshot for this category.".into(),
+        sparkline: Vec::new(),
+    };
+    let Some(identity) = &row.item_identity else {
+        result.detail =
+            "Exact item identity is unavailable. Refresh the historical analysis.".into();
+        return result;
+    };
+    if row.category == "ClusterJewel" && identity.cluster_level.is_none() {
+        result.detail =
+            "Historical cluster jewel item-level bracket is unknown; no name-only match is used."
+                .into();
+        return result;
+    }
+    let matches = category
+        .and_then(|category| category.items.get(identity))
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let Some((overview, line)) = matches.first().copied() else {
+        if let Some(overview) = category.and_then(|category| category.latest) {
+            result.status = "not_observed".into();
+            result.fetched_at = Some(overview.fetched_at.clone());
+            result.detail = "Exact variant not observed in saved poe.ninja data. This does not prove it cannot drop or be traded.".into();
+        }
+        return result;
+    };
+    if matches
+        .iter()
+        .filter(|(candidate, _)| std::ptr::eq(*candidate, overview))
+        .count()
+        != 1
+    {
+        result.status = "ambiguous".into();
+        result.detail =
+            "Multiple poe.ninja items share this identity; no price or listing count is guessed."
+                .into();
+        return result;
+    }
+    result.status = "observed".into();
+    result.price = if overview.quote_currency == "Chaos Orb" {
+        line.price.as_deref().and_then(positive).map(number)
+    } else {
+        None
+    };
+    result.listings = line.listings;
+    result.fetched_at = Some(overview.fetched_at.clone());
+    result.source = Some(overview.source.clone());
+    result.sparkline = line.sparkline.clone();
+    result.detail = "Observed in saved poe.ninja data, not a live stock guarantee. Listing counts are provider-reported; unknown is not zero.".into();
+    result
 }
 
 fn sample_hours(start: i64, end: i64, daily: bool) -> Vec<i64> {
@@ -385,6 +542,26 @@ async fn flips(
     {
         return Err((StatusCode::BAD_REQUEST, "Unsupported trading venue.".into()));
     }
+    let presence = query.presence.as_deref().filter(|value| !value.is_empty());
+    if let Some(presence) = presence {
+        if !matches!(
+            presence,
+            "observed" | "not_observed" | "unknown" | "ambiguous"
+        ) {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "Unsupported current-league presence filter.".into(),
+            ));
+        }
+        let current_league = query.current_league.as_deref().ok_or_else(|| {
+            (
+                StatusCode::BAD_REQUEST,
+                "Current league is required for a presence filter.".into(),
+            )
+        })?;
+        market_core::ggg::validate_league(current_league)
+            .map_err(|error| (StatusCode::BAD_REQUEST, error))?;
+    }
     let minimum = filter_decimal(query.min_price.as_deref(), "Minimum starting price")?;
     let maximum = filter_decimal(query.max_price.as_deref(), "Maximum starting price")?;
     let min_volume = filter_decimal(query.min_volume.as_deref(), "Minimum exchange item volume")?
@@ -530,6 +707,31 @@ async fn flips(
                 .as_deref()
                 .is_none_or(|venue| venue.is_empty() || venue == row.venue)
     });
+    if let Some(presence) = presence {
+        let categories = result
+            .rows
+            .iter()
+            .map(|row| row.category.clone())
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let overviews = state
+            .economy_store
+            .current_economies(
+                query
+                    .current_league
+                    .as_deref()
+                    .expect("validated current league"),
+                &categories,
+            )
+            .await
+            .map_err(failure)?;
+        let indexed = index_current(&overviews);
+        result
+            .rows
+            .retain(|row| current_item(row, indexed.get(row.category.as_str())).status == presence);
+        result.warnings.push("Current-league presence is filtered before pagination using saved poe.ninja snapshots. Not observed is not proof of unavailability; Unknown and ambiguous variants remain separate.".into());
+    }
     result.rows.sort_by(|a, b| {
         let value = |row: &FlipRow| {
             if sort.starts_with("percent") {
@@ -901,6 +1103,9 @@ fn build_flips_with_starts(
         *name_counts.entry(ggg_name_key(item)).or_default() += 1;
     }
     for (id, item) in items {
+        if id == CHAOS {
+            continue;
+        }
         let mut alternatives = Vec::<(PairAlternative, Decimal, bool)>::new();
         let mut shared_pairs = 0;
         let mut volume_eligible_pairs = 0;
@@ -1024,6 +1229,10 @@ fn build_flips_with_starts(
         }
         result.rows.push(FlipRow {
             id: format!("ggg:{id}"),
+            item_identity: Some(FlipItemIdentity {
+                name: item.name.clone(),
+                ..Default::default()
+            }),
             name: item.name,
             category: item.category,
             venue: "exchange".into(),
@@ -1224,6 +1433,15 @@ fn add_ninja_rows(
         let first = start_by_key.get(&key);
         let last = end_by_key.get(&key);
         let observation = first.or(last).expect("key exists");
+        if observation.category == "Currency"
+            && observation
+                .line
+                .name
+                .trim()
+                .eq_ignore_ascii_case("Chaos Orb")
+        {
+            continue;
+        }
         if simple_name(observation).is_some_and(|name| ggg_identities.contains(&name)) {
             continue;
         }
@@ -1325,6 +1543,7 @@ fn add_ninja_rows(
             history_granularity: Some(first.granularity.clone()),
             start_confidence: first.confidence.clone(),
             end_confidence: last.confidence.clone(),
+            item_identity: Some(FlipItemIdentity::from_line(&first.category, &first.line)),
             alternatives: Vec::new(),
         });
     }
@@ -1540,6 +1759,319 @@ mod tests {
             archive: Some("Dump".into()),
             volume: None,
             confidence: None,
+        }
+    }
+
+    #[test]
+    fn chaos_is_a_conversion_currency_not_a_flip_candidate_in_any_feed() {
+        let starts = [market(DIVINE, CHAOS, "10", "1000")];
+        let ends = [market(DIVINE, CHAOS, "10", "2000")];
+        let ninja_start = [
+            ninja("chaos", "Chaos Orb", "Currency", "2026-01-01", "1"),
+            ninja("oil", "Golden Oil", "Oil", "2026-01-01", "10"),
+        ];
+        let ninja_end = [
+            ninja("chaos", "Chaos Orb", "Currency", "2026-01-02", "1"),
+            ninja("oil", "Golden Oil", "Oil", "2026-01-02", "15"),
+        ];
+        for use_ggg in [false, true] {
+            let result = build_flips(
+                "Test",
+                START,
+                END,
+                if use_ggg { &starts } else { &[] },
+                if use_ggg { &ends } else { &[] },
+                &ninja_start,
+                &ninja_end,
+                Decimal::ZERO,
+            );
+            assert!(!result.rows.iter().any(|row| row.name == "Chaos Orb"));
+            assert!(!result.excluded.iter().any(|row| row.name == "Chaos Orb"));
+            let oil = result
+                .rows
+                .iter()
+                .find(|row| row.name == "Golden Oil")
+                .unwrap();
+            assert_eq!(oil.start_price, "10");
+            assert_eq!(oil.end_price, "15");
+            if use_ggg {
+                let divine = result
+                    .rows
+                    .iter()
+                    .find(|row| row.name == "Divine Orb")
+                    .unwrap();
+                assert_eq!(divine.start_price, "100");
+                assert_eq!(divine.end_price, "200");
+            }
+        }
+    }
+
+    fn availability_row(id: &str, name: &str, category: &str) -> FlipRow {
+        build_flips(
+            "Archive",
+            START,
+            END,
+            &[],
+            &[],
+            &[ninja(id, name, category, "2026-01-01", "10")],
+            &[ninja(id, name, category, "2026-01-02", "20")],
+            Decimal::ZERO,
+        )
+        .rows
+        .pop()
+        .unwrap()
+    }
+
+    fn live_overview(category: &str, lines: Vec<Line>) -> economy::Overview {
+        economy::Overview {
+            league: "Current".into(),
+            category: category.into(),
+            source: "stash".into(),
+            fetched_at: "2026-11-13T20:00:00Z".into(),
+            quote_currency: "Chaos Orb".into(),
+            rates: BTreeMap::new(),
+            lines,
+        }
+    }
+
+    #[test]
+    fn availability_matches_variants_not_provider_ids_and_normalizes_dump_gem_attributes() {
+        let line = Line {
+            id: "new-provider-id".into(),
+            name: "Empower Support".into(),
+            gem_level: Some(4),
+            gem_quality: Some(20),
+            corrupted: Some(true),
+            price: Some("125.500".into()),
+            listings: Some(0),
+            ..Line::default()
+        };
+        let mut archive_line = line.clone();
+        archive_line.id = "archive:old-id".into();
+        archive_line.variant = Some("4/20c".into());
+        let mut row = availability_row("gem", "Empower Support", "SkillGem");
+        row.item_identity = Some(FlipItemIdentity::from_line("SkillGem", &archive_line));
+        let overviews = vec![live_overview("SkillGem", vec![line.clone()])];
+        let indexed = index_current(&overviews);
+        let observed = current_item(&row, indexed.get("SkillGem"));
+        assert_eq!(observed.status, "observed");
+        assert_eq!(observed.price.as_deref(), Some("125.5"));
+        assert_eq!(observed.listings, Some(0));
+        assert_eq!(observed.fetched_at.as_deref(), Some("2026-11-13T20:00:00Z"));
+        for different in [
+            FlipItemIdentity {
+                gem_level: Some(3),
+                ..row.item_identity.clone().unwrap()
+            },
+            FlipItemIdentity {
+                gem_quality: Some(0),
+                ..row.item_identity.clone().unwrap()
+            },
+            FlipItemIdentity {
+                corrupted: Some(false),
+                ..row.item_identity.clone().unwrap()
+            },
+            FlipItemIdentity {
+                links: Some(6),
+                ..row.item_identity.clone().unwrap()
+            },
+            FlipItemIdentity {
+                base_type: Some("Different base".into()),
+                ..row.item_identity.clone().unwrap()
+            },
+            FlipItemIdentity {
+                map_tier: Some(16),
+                ..row.item_identity.clone().unwrap()
+            },
+            FlipItemIdentity {
+                variant: Some("Different variant".into()),
+                ..row.item_identity.clone().unwrap()
+            },
+        ] {
+            let mut other = row.clone();
+            other.item_identity = Some(different);
+            assert_eq!(
+                current_item(&other, indexed.get("SkillGem")).status,
+                "not_observed"
+            );
+        }
+        let mut missing_identity = row.clone();
+        missing_identity.item_identity = None;
+        assert_eq!(
+            current_item(&missing_identity, indexed.get("SkillGem")).status,
+            "unknown"
+        );
+        assert_eq!(current_item(&row, None).status, "unknown");
+        let duplicate = vec![live_overview("SkillGem", vec![line.clone(), line])];
+        assert_eq!(
+            current_item(&row, index_current(&duplicate).get("SkillGem")).status,
+            "ambiguous"
+        );
+    }
+
+    #[test]
+    fn availability_preserves_unknown_counts_and_uses_one_snapshot_without_splicing_sources() {
+        let row = availability_row("oil", "Golden Oil", "Oil");
+        let older = live_overview(
+            "Oil",
+            vec![Line {
+                name: "Golden Oil".into(),
+                listings: Some(42),
+                price: Some("25".into()),
+                ..Line::default()
+            }],
+        );
+        let mut newer = older.clone();
+        newer.source = "exchange".into();
+        newer.fetched_at = "2026-11-13T20:15:00Z".into();
+        newer.lines[0].listings = None;
+        newer.lines[0].price = Some("30".into());
+        newer.lines[0].sparkline =
+            vec![Some("0".into()), Some("-2".into()), None, Some("5".into())];
+        let overviews = vec![older, newer];
+        let indexed = index_current(&overviews);
+        let observed = current_item(&row, indexed.get("Oil"));
+        assert_eq!(observed.price.as_deref(), Some("30"));
+        assert_eq!(observed.listings, None);
+        assert_eq!(observed.source.as_deref(), Some("exchange"));
+        assert_eq!(
+            observed.sparkline,
+            vec![Some("0".into()), Some("-2".into()), None, Some("5".into())]
+        );
+        let absent = availability_row("oil2", "Silver Oil", "Oil");
+        let missing = current_item(&absent, indexed.get("Oil"));
+        assert_eq!(missing.status, "not_observed");
+        assert!(missing.detail.contains("does not prove"));
+        let mut cluster = availability_row("cluster", "Large Cluster Jewel", "ClusterJewel");
+        assert_eq!(current_item(&cluster, None).status, "unknown");
+        cluster.item_identity.as_mut().unwrap().cluster_level = Some(84);
+        let line = Line {
+            name: "Large Cluster Jewel".into(),
+            metadata: BTreeMap::from([("levelRequired".into(), serde_json::json!(75))]),
+            ..Line::default()
+        };
+        let clusters = vec![live_overview("ClusterJewel", vec![line])];
+        assert_eq!(
+            current_item(&cluster, index_current(&clusters).get("ClusterJewel")).status,
+            "not_observed"
+        );
+        let ggg = build_flips(
+            "Archive",
+            START,
+            END,
+            &[market(DIVINE, CHAOS, "1", "100")],
+            &[market(DIVINE, CHAOS, "1", "120")],
+            &[],
+            &[],
+            Decimal::ZERO,
+        );
+        let divine = ggg
+            .rows
+            .iter()
+            .find(|row| row.name == "Divine Orb")
+            .unwrap();
+        let live = vec![live_overview(
+            "Currency",
+            vec![Line {
+                name: "Divine Orb".into(),
+                price: Some("150".into()),
+                ..Line::default()
+            }],
+        )];
+        assert_eq!(
+            current_item(divine, index_current(&live).get("Currency")).status,
+            "observed"
+        );
+    }
+
+    #[tokio::test]
+    async fn availability_endpoint_reads_only_target_league_saved_data_and_bounds_batches() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = market_store::SqliteStore::connect(directory.path().join("primary.sqlite3"))
+            .await
+            .unwrap();
+        let economy_store =
+            market_store::SqliteStore::connect(directory.path().join("economy.sqlite3"))
+                .await
+                .unwrap();
+        economy_store
+            .save_economy(&live_overview(
+                "Oil",
+                vec![Line {
+                    id: "new-live-id".into(),
+                    name: "Golden Oil".into(),
+                    price: Some("35".into()),
+                    listings: Some(12),
+                    ..Line::default()
+                }],
+            ))
+            .await
+            .unwrap();
+        let mut archive = live_overview(
+            "Oil",
+            vec![Line {
+                name: "Golden Oil".into(),
+                price: Some("9999".into()),
+                ..Line::default()
+            }],
+        );
+        archive.league = "Archive".into();
+        economy_store.save_economy(&archive).await.unwrap();
+        let (selection, _) = tokio::sync::watch::channel(None);
+        let app = crate::router(
+            ServiceState::new(store, "Test", selection).with_economy_store(economy_store),
+        );
+        let row = availability_row("oil", "Golden Oil", "Oil");
+        for count in [1, 100, 101] {
+            let rows = (0..count)
+                .map(|index| {
+                    let mut row = row.clone();
+                    row.id = format!("row-{index}");
+                    row
+                })
+                .collect::<Vec<_>>();
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/v1/analysis/current-availability")
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::json!({ "league": "Current", "rows": rows }).to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            if count > 100 {
+                assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            } else {
+                assert_eq!(response.status(), StatusCode::OK);
+                let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+                let result: CurrentAvailability = serde_json::from_slice(&body).unwrap();
+                assert_eq!(result.league, "Current");
+                assert_eq!(result.items.len(), count);
+                assert_eq!(result.items[0].price.as_deref(), Some("35"));
+                assert_eq!(result.items[0].listings, Some(12));
+            }
+        }
+        for (league, rows) in [("", vec![row.clone()]), ("Current", vec![row.clone(), row])] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/v1/analysis/current-availability")
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::json!({ "league": league, "rows": rows }).to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         }
     }
 
@@ -2660,11 +3192,11 @@ mod tests {
         let (selection, _) = tokio::sync::watch::channel(None);
         let app = crate::router(ServiceState::new(store, "Test", selection));
         for (filter, expected_total, expected_rows) in [
-            ("", 520, 100),
-            ("&min_confidence=Low", 519, 100),
-            ("&min_confidence=Medium", 516, 100),
-            ("&min_confidence=High", 513, 100),
-            ("&min_confidence=High&offset=500", 513, 13),
+            ("", 519, 100),
+            ("&min_confidence=Low", 518, 100),
+            ("&min_confidence=Medium", 515, 100),
+            ("&min_confidence=High", 512, 100),
+            ("&min_confidence=High&offset=500", 512, 12),
             ("&min_confidence=High&category=SkillGem&offset=500", 511, 11),
             ("&min_confidence=High&min_volume=1000", 511, 100),
         ] {
@@ -2705,6 +3237,100 @@ mod tests {
             .uri(format!("/api/v1/analysis/flips?league=Test&start={START}&end={END}&min_confidence=Unknown"))
             .body(Body::empty()).unwrap()).await.unwrap();
         assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn current_presence_filters_before_pagination_with_correct_totals_and_unknowns() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = market_store::SqliteStore::connect(directory.path().join("presence.sqlite3"))
+            .await
+            .unwrap();
+        let lines = (0..205)
+            .map(|index| Line {
+                id: format!("historical-{index}"),
+                name: format!("Gem {index:03}"),
+                price: Some("10".into()),
+                ..Line::default()
+            })
+            .collect::<Vec<_>>();
+        for hour in [START, END] {
+            let mut historical = live_overview("SkillGem", lines.clone());
+            historical.league = "Test".into();
+            historical.fetched_at = utc_hour(hour);
+            store.save_economy(&historical).await.unwrap();
+            let mut missing = live_overview(
+                "UniqueWeapon",
+                vec![Line {
+                    id: "unknown".into(),
+                    name: "No live category".into(),
+                    price: Some("20".into()),
+                    ..Line::default()
+                }],
+            );
+            missing.league = "Test".into();
+            missing.fetched_at = utc_hour(hour);
+            store.save_economy(&missing).await.unwrap();
+        }
+        let mut live_lines = lines[83..].to_vec();
+        live_lines.extend_from_slice(&lines[83..85]);
+        for line in &mut live_lines {
+            line.id = format!("current-{}", line.id);
+            line.sparkline = vec![Some("0".into()), Some("-2".into()), None, Some("5".into())];
+        }
+        store
+            .save_economy(&live_overview("SkillGem", live_lines))
+            .await
+            .unwrap();
+        let (selection, _) = tokio::sync::watch::channel(None);
+        let app = crate::router(ServiceState::new(store, "Test", selection));
+        for (filter, total, count) in [
+            (
+                "presence=observed&current_league=Current&offset=100",
+                120,
+                20,
+            ),
+            ("presence=not_observed&current_league=Current", 83, 83),
+            ("presence=ambiguous&current_league=Current", 2, 2),
+            ("presence=unknown&current_league=Current", 1, 1),
+            ("presence=unknown&current_league=NoSnapshots", 206, 100),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(format!(
+                            "/api/v1/analysis/flips?league=Test&start={START}&end={END}&{filter}"
+                        ))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "{filter}");
+            let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            let result: Flips = serde_json::from_slice(&body).unwrap();
+            assert_eq!(result.total, total, "{filter}");
+            assert_eq!(result.rows.len(), count, "{filter}");
+        }
+        for filter in [
+            "presence=observed",
+            "presence=missing&current_league=Current",
+            "presence=observed&current_league=",
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(format!(
+                            "/api/v1/analysis/flips?league=Test&start={START}&end={END}&{filter}"
+                        ))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{filter}");
+        }
     }
 
     #[tokio::test]

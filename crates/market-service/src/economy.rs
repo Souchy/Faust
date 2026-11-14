@@ -163,7 +163,7 @@ async fn economy_leagues(State(state): State<ServiceState>) -> Result<Json<Vec<L
     }
     merge_ggg_leagues(
         &mut result,
-        state.store.ggg_leagues().await.map_err(failure)?,
+        state.economy_store.ggg_leagues().await.map_err(failure)?,
     );
     Ok(Json(result))
 }
@@ -843,7 +843,14 @@ async fn start_ggg_archive_import(
             StatusCode::BAD_REQUEST,
             "Archive is not in the published catalog.".into(),
         ))?;
-    let range = archive_ggg_range(&entry, Utc::now().timestamp())?;
+    let mut range = archive_ggg_range(&entry, Utc::now().timestamp())?;
+    let launch = crate::analysis::league_start::lookup(&state, &range.league).await?;
+    if let Some(start) = launch.start.filter(|_| !launch.approximate) {
+        // Extend coverage when the archive starts after launch; never discard published hours.
+        range.start = range
+            .start
+            .min(start.div_euclid(market_core::ggg::HOUR) * market_core::ggg::HOUR);
+    }
     crate::ggg::start_archive_import(state, range)
         .await
         .map(Json)

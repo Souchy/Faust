@@ -440,6 +440,14 @@ async fn migrate(pool: &SqlitePool) -> Result<(), StoreError> {
             11_i64,
             include_str!("../migrations/0011_confidence_dates_covering.sql"),
         ),
+        (
+            12_i64,
+            include_str!("../migrations/0012_league_launches.sql"),
+        ),
+        (
+            13_i64,
+            include_str!("../migrations/0013_ggg_pair_items.sql"),
+        ),
     ] {
         let applied: Option<i64> =
             sqlx::query_scalar("SELECT version FROM schema_migrations WHERE version = ?")

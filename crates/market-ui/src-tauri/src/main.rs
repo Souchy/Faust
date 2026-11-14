@@ -2,10 +2,18 @@
 
 #[cfg(any(not(debug_assertions), test))]
 mod backend;
+mod settings;
 mod updates;
+
+fn window_title(name: &str, version: &str, debug: bool) -> String {
+    let suffix = if debug { " (debug)" } else { "" };
+    format!("{name} v{version}{suffix}")
+}
 
 fn main() {
     let builder = tauri::Builder::default()
+        .manage(settings::ClientSettings::default())
+        .invoke_handler(tauri::generate_handler![settings::load_flip_period, settings::save_flip_period])
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(updates::UpdateCheck::default())
@@ -47,7 +55,15 @@ fn main() {
             .text("check-updates", "Check for updates...")
             .build()?;
         app.set_menu(tauri::menu::MenuBuilder::new(app).item(&help).build()?)?;
-        tauri::WebviewWindowBuilder::from_config(app, &app.config().app.windows[0])?.build()?;
+        let window = &app.config().app.windows[0];
+        let title = window_title(
+            &window.title,
+            &app.package_info().version.to_string(),
+            cfg!(debug_assertions),
+        );
+        tauri::WebviewWindowBuilder::from_config(app, window)?
+            .title(title)
+            .build()?;
         #[cfg(not(debug_assertions))]
         updates::check(app.handle(), false);
         Ok(())
@@ -86,6 +102,18 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn window_title_shows_version_and_marks_only_debug_builds() {
+        assert_eq!(
+            super::window_title("Faust", "0.1.1", false),
+            "Faust v0.1.1"
+        );
+        assert_eq!(
+            super::window_title("Faust", "0.1.1", true),
+            "Faust v0.1.1 (debug)"
+        );
+    }
+
     #[test]
     fn installer_and_updater_use_the_frontend_package_version() {
         let package: serde_json::Value =

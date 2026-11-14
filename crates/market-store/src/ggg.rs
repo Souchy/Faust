@@ -10,9 +10,7 @@ SELECT o.*, p.market,
  b.metadata b_id, b.name b_name, b.category b_category, b.icon b_icon
 FROM ggg_observations o JOIN ggg_leagues l ON l.id=o.league
 JOIN ggg_pairs p ON p.id=o.pair
-JOIN ggg_items a ON a.id=p.a JOIN ggg_items b ON b.id=p.b
-WHERE l.name=? AND o.hour BETWEEN ? AND ? AND (? IS NULL OR p.market=?)
-ORDER BY o.hour, p.market"#;
+JOIN ggg_items a ON a.id=p.a JOIN ggg_items b ON b.id=p.b"#;
 
 fn validate(league: &str, start: i64, end: i64) -> Result<(), StoreError> {
     market_core::ggg::validate_range(league, start, end, chrono::Utc::now().timestamp())
@@ -91,6 +89,112 @@ fn market(row: &SqliteRow) -> Result<Market, StoreError> {
 }
 
 impl SqliteStore {
+    pub async fn latest_ggg_hour(
+        &self,
+        league: &str,
+        before: i64,
+    ) -> Result<Option<i64>, StoreError> {
+        Ok(sqlx::query_scalar(
+            "SELECT MAX(h.hour) FROM ggg_hours h JOIN ggg_leagues l ON l.id=h.league
+            WHERE l.name=? AND h.complete=1 AND h.hour<=?",
+        )
+        .bind(league)
+        .bind(before)
+        .fetch_one(&self.pool)
+        .await?)
+    }
+
+    pub async fn ggg_dates(&self, league: &str) -> Result<Vec<String>, StoreError> {
+        Ok(sqlx::query_scalar(
+            "SELECT DISTINCT strftime('%Y-%m-%d',h.hour,'unixepoch') FROM ggg_hours h
+            JOIN ggg_leagues l ON l.id=h.league WHERE l.name=? AND h.complete=1 ORDER BY 1 DESC",
+        )
+        .bind(league)
+        .fetch_all(&self.pool)
+        .await?)
+    }
+
+    pub async fn ggg_items(&self, league: &str, category: &str) -> Result<Vec<Item>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT i.metadata,i.name,i.category,i.icon FROM ggg_items i
+            WHERE EXISTS (SELECT 1 FROM ggg_pairs p
+              CROSS JOIN ggg_observations o INDEXED BY ggg_history ON o.pair=p.id
+              JOIN ggg_hours h ON h.league=o.league AND h.hour=o.hour AND h.complete=1
+              WHERE (p.a=i.id OR p.b=i.id) AND o.league=(SELECT id FROM ggg_leagues WHERE name=?))
+            AND i.category=? ORDER BY i.name,i.metadata",
+        )
+        .bind(league)
+        .bind(category)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .iter()
+            .map(|row| Item {
+                id: row.get("metadata"),
+                name: row.get("name"),
+                category: row.get("category"),
+                icon: row.get("icon"),
+            })
+            .collect())
+    }
+
+    pub async fn ggg_price_markets(
+        &self,
+        league: &str,
+        start: i64,
+        end: i64,
+        category: &str,
+        item: Option<&str>,
+    ) -> Result<Vec<(i64, Market)>, StoreError> {
+        let chaos = "Metadata/Items/Currency/CurrencyRerollRare";
+        // Rank in SQLite before materializing market metadata: a full league can contain
+        // millions of native pairs, but only one price and its conversion are needed per hour.
+        let sql = format!(
+            r#"
+WITH target AS (SELECT id FROM ggg_items WHERE category=?6 AND (?4 IS NULL OR metadata=?4)),
+chaos AS (SELECT id FROM ggg_items WHERE metadata=?5),
+candidates AS (
+ SELECT o.hour,o.pair,p.market,t.id item,
+   CASE WHEN p.a=t.id THEN p.b ELSE p.a END quote,
+   CASE WHEN p.a=t.id THEN o.volume_a ELSE o.volume_b END volume
+ FROM target t CROSS JOIN ggg_pairs p ON p.a=t.id OR p.b=t.id
+ CROSS JOIN ggg_observations o INDEXED BY ggg_history ON o.pair=p.id
+ WHERE o.league=(SELECT id FROM ggg_leagues WHERE name=?1)
+   AND o.hour BETWEEN ?2 AND ?3 AND o.volume_a>0 AND o.volume_b>0
+),
+ranked AS (
+ SELECT c.hour,c.pair,r.id rate_pair,
+ ROW_NUMBER() OVER (PARTITION BY c.hour,c.item ORDER BY (c.quote=ch.id) DESC,c.volume DESC,c.market,r.market) rank
+ FROM candidates c CROSS JOIN chaos ch
+ LEFT JOIN ggg_pairs r ON (r.a=c.quote AND r.b=ch.id) OR (r.b=c.quote AND r.a=ch.id)
+ LEFT JOIN ggg_observations conversion ON conversion.pair=r.id AND conversion.hour=c.hour
+   AND conversion.league=(SELECT id FROM ggg_leagues WHERE name=?1)
+   AND conversion.volume_a>0 AND conversion.volume_b>0
+ WHERE c.quote=ch.id OR conversion.pair IS NOT NULL
+),
+chosen AS (
+ SELECT hour,pair FROM ranked WHERE rank=1
+ UNION SELECT hour,rate_pair FROM ranked WHERE rank=1 AND rate_pair IS NOT NULL
+)
+{SELECT_MARKETS}
+WHERE l.name=?1 AND (o.hour,o.pair) IN (SELECT hour,pair FROM chosen)
+ AND EXISTS (SELECT 1 FROM ggg_hours h WHERE h.league=o.league AND h.hour=o.hour AND h.complete=1)
+ORDER BY o.hour,p.market"#
+        );
+        let rows = sqlx::query(&sql)
+            .bind(league)
+            .bind(start)
+            .bind(end)
+            .bind(item)
+            .bind(chaos)
+            .bind(category)
+            .fetch_all(&self.pool)
+            .await?;
+        rows.iter()
+            .map(|row| Ok((row.get("hour"), market(row)?)))
+            .collect()
+    }
+
     pub async fn ggg_leagues(&self) -> Result<Vec<String>, StoreError> {
         Ok(sqlx::query_scalar(
             "SELECT name FROM ggg_leagues l WHERE EXISTS
@@ -164,17 +268,19 @@ impl SqliteStore {
 
     pub async fn ggg_markets(&self, league: &str, hour: i64) -> Result<Vec<Market>, StoreError> {
         validate(league, hour, hour)?;
-        sqlx::query(SELECT_MARKETS)
-            .bind(league)
-            .bind(hour)
-            .bind(hour)
-            .bind(Option::<&str>::None)
-            .bind(Option::<&str>::None)
-            .fetch_all(&self.pool)
-            .await?
-            .iter()
-            .map(market)
-            .collect()
+        sqlx::query(&format!(
+            "{SELECT_MARKETS} WHERE l.name=? AND o.hour BETWEEN ? AND ? AND (? IS NULL OR p.market=?) ORDER BY o.hour,p.market"
+        ))
+        .bind(league)
+        .bind(hour)
+        .bind(hour)
+        .bind(Option::<&str>::None)
+        .bind(Option::<&str>::None)
+        .fetch_all(&self.pool)
+        .await?
+        .iter()
+        .map(market)
+        .collect()
     }
 
     pub async fn ggg_first_trade_hours(
@@ -259,14 +365,16 @@ impl SqliteStore {
         end: i64,
     ) -> Result<History, StoreError> {
         let coverage = self.ggg_coverage(league, start, end).await?;
-        let rows = sqlx::query(SELECT_MARKETS)
-            .bind(league)
-            .bind(start)
-            .bind(end)
-            .bind(id)
-            .bind(id)
-            .fetch_all(&self.pool)
-            .await?;
+        let rows = sqlx::query(&format!(
+            "{SELECT_MARKETS} WHERE l.name=? AND o.hour BETWEEN ? AND ? AND (? IS NULL OR p.market=?) ORDER BY o.hour,p.market"
+        ))
+        .bind(league)
+        .bind(start)
+        .bind(end)
+        .bind(id)
+        .bind(id)
+        .fetch_all(&self.pool)
+        .await?;
         let points = rows
             .iter()
             .map(|row| {
@@ -448,6 +556,42 @@ mod tests {
             .unwrap();
         assert!(store.ggg_markets("Other", HOUR).await.unwrap().is_empty());
         assert!(store.ggg_hour_complete("Other", HOUR).await.unwrap());
+        assert_eq!(
+            store.latest_ggg_hour("Test", HOUR * 2).await.unwrap(),
+            Some(HOUR)
+        );
+        assert_eq!(store.latest_ggg_hour("Test", 0).await.unwrap(), None);
+        assert_eq!(
+            store
+                .ggg_price_markets("Test", 0, HOUR * 2, "Unknown", None)
+                .await
+                .unwrap()
+                .len(),
+            0
+        );
+        assert_eq!(
+            store
+                .ggg_price_markets("Test", 0, HOUR * 2, "Unknown", Some("A"))
+                .await
+                .unwrap()
+                .len(),
+            0
+        );
+        assert!(
+            store
+                .ggg_price_markets("Test", 0, HOUR * 2, "Unknown", Some("missing"))
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            store
+                .ggg_price_markets("Other", 0, HOUR * 2, "Unknown", None)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(store.ggg_items("Test", "Unknown").await.unwrap().len(), 2);
         let history = store.ggg_history("Test", "A|B", 0, HOUR * 2).await.unwrap();
         assert_eq!(history.points.len(), 1);
         assert_eq!(history.coverage.expected_hours, 3);

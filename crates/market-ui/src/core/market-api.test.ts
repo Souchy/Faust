@@ -21,6 +21,19 @@ describe('direct HTTP transport', () => {
     await expect(api.flipSparklines('A', 3600, 7200, Array.from({ length: 101 }, () => rows[0]!), signal)).rejects.toThrow('at most 100');
     expect(fetch).toHaveBeenCalledTimes(2);
   });
+  it('checks current availability in one bounded request with the target live league', async () => {
+    const fetch = vi.fn(async () => Response.json({ league: 'A & B', items: [] }));
+    vi.stubGlobal('fetch', fetch);
+    const api = new MarketApi(''), signal = new AbortController().signal;
+    const rows = flipAnalysis().rows;
+    await api.currentAvailability('A & B', rows, signal);
+    expect(fetch).toHaveBeenLastCalledWith('/api/v1/analysis/current-availability', expect.objectContaining({
+      method: 'POST', signal, body: JSON.stringify({ league: 'A & B', rows }),
+    }));
+    await expect(api.currentAvailability('A', Array.from({ length: 101 }, () => rows[0]!), signal))
+      .rejects.toThrow('at most 100');
+    expect(fetch).toHaveBeenCalledOnce();
+  });
   it('shares one API instance across the application container and its children', () => {
     const container = DI.createContainer().register(Registration.singleton(MarketApi, MarketApi));
     const api = container.get(MarketApi);

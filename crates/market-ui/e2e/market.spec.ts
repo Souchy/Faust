@@ -2,6 +2,11 @@ import { expect, test, type Page } from '@playwright/test';
 import { categorizedGemOverview, gemAnalysis, gemOverview, prices, status, economyCategories, economyOverview, economyArchive, economyLine } from '../src/testing/fixtures';
 import { gggJob } from '../src/testing/historical-fixtures';
 
+async function openNinjaPrices(page: Page, path = '/') {
+  await page.goto(path);
+  await page.getByRole('button', { name: 'poe.ninja Exchange', exact: true }).click();
+}
+
 async function service(page: Page, options: {
   many?: boolean; failPrices?: boolean; lowConfidence?: boolean; categorized?: boolean; trimHistoryOnRefresh?: boolean;
 } = {}) {
@@ -20,12 +25,23 @@ async function service(page: Page, options: {
   await page.route('**/api/v1/**', async (route) => {
     const request = route.request();
     const path = new URL(request.url()).pathname;
+    if (path === '/api/v1/ggg/prices') {
+      const query = new URL(request.url()).searchParams;
+      return options.failPrices ? route.fulfill({ status: 502, body: 'Provider unavailable' }) : route.fulfill({ json: {
+        overview: { ...economyOverview(query.get('category') ?? 'Currency', 'exchange', query.get('league') ?? 'Standard', query.get('date') ?? ''), source: 'ggg' },
+        launch: 0, current_launch: 0, current_league: 'Standard', trends: {}, warnings: [], dates: ['2026-07-16', '2026-06-25'],
+      } });
+    }
     if (path.includes('/economy/')) {
       const query = new URL(request.url()).searchParams;
       if (path.endsWith('/categories')) return route.fulfill({ json: economyCategories() });
       if (path.endsWith('/leagues')) return route.fulfill({ json: [{ id: 'Standard', name: 'Standard', live: true }, { id: 'Other', name: 'Other league', live: true }, { id: 'Ancestors', name: 'Ancestors', live: true, archived: true }] });
       if (path.endsWith('/dates')) return route.fulfill({ json: query.get('league') === 'Standard'
         ? ['2026-11-09'] : ['2026-07-16', '2026-06-25'] });
+      if (path.endsWith('/comparison')) return route.fulfill({ json: {
+        overview: economyOverview(query.get('category') ?? 'Currency', 'stash', query.get('league') ?? 'Standard', query.get('date') ?? ''),
+        launch: 0, current_launch: 0, current_league: 'Standard', trends: {}, warnings: [],
+      } });
       if (path.endsWith('/overview') || path.endsWith('/refresh')) return options.failPrices
         ? route.fulfill({ status: 502, body: 'Provider unavailable' }) : route.fulfill({ json: economyOverview(
         query.get('category') ?? 'Currency', query.get('source') === 'stash' ? 'stash' : 'exchange',
@@ -73,8 +89,8 @@ test('economy categories, facets, source views, details and responsive layout', 
   await service(page);
   const errors: string[] = [];
   page.on('pageerror', (error) => errors.push(error.message));
-  await page.goto('/');
-  await page.getByRole('button', { name: 'Stash', exact: true }).click();
+  await openNinjaPrices(page);
+  await page.getByRole('button', { name: 'poe.ninja Stash', exact: true }).click();
   await page.getByRole('button', { name: 'Skill Gems', exact: true }).click();
   await expect(page.locator('.economy-table tbody tr')).toHaveCount(2);
   await page.getByRole('combobox', { name: 'Gem level', exact: true }).selectOption('21');
@@ -107,7 +123,7 @@ test('economy categories, facets, source views, details and responsive layout', 
 
 test('economy groups separate items and unique equipment while keeping unique maps in Atlas', async ({ page }) => {
   await service(page);
-  await page.goto('/');
+  await openNinjaPrices(page);
   const sidebar = page.getByRole('navigation', { name: 'Economy categories', exact: true });
   const group = (name: string) => sidebar.locator('section').filter({
     has: page.getByRole('heading', { name, exact: true, level: 2 }),
@@ -120,8 +136,8 @@ test('economy groups separate items and unique equipment while keeping unique ma
   for (const name of ['Wombgifts', 'Corpses', 'Incubators', 'Unique Weapons', 'Unique Maps']) {
     await sidebar.getByRole('button', { name, exact: true }).click();
     await expect(page.getByRole('heading', { name, exact: true, level: 1 })).toBeVisible();
-    await expect(page.getByRole('button', { name: 'Stash', exact: true })).toBeVisible();
-    await expect(page.getByRole('button', { name: 'Exchange', exact: true })).toHaveCount(0);
+    await expect(page.getByRole('button', { name: 'poe.ninja Stash', exact: true })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'poe.ninja Exchange', exact: true })).toHaveCount(0);
   }
   await page.setViewportSize({ width: 390, height: 800 });
   const category = page.getByRole('combobox', { name: 'Economy category', exact: true });
@@ -137,7 +153,7 @@ test('economy groups separate items and unique equipment while keeping unique ma
 
 test('price captions are omitted and Clear filters only appears with category-specific filters', async ({ page }) => {
   await service(page);
-  await page.goto('/');
+  await openNinjaPrices(page);
   await expect(page.locator('.economy-table tbody tr')).toHaveCount(2);
   const clear = page.getByRole('button', { name: 'Clear filters', exact: true });
   await expect(clear).toHaveCount(0);
@@ -193,8 +209,9 @@ test('the whole price page scrolls instead of the item table on desktop and mobi
   });
   for (const width of [1280, 390]) {
     await page.setViewportSize({ width, height: 640 });
-    await page.goto('/#/prices');
+    await openNinjaPrices(page, '/#/prices');
     await page.reload();
+    await page.getByRole('button', { name: 'poe.ninja Exchange', exact: true }).click();
     const prices = page.getByRole('region', { name: 'Current prices', exact: true });
     const table = page.locator('.economy-table');
     const heading = page.locator('.economy-heading');
@@ -230,7 +247,7 @@ test('graph handles drag both period edges and history scrolls with the detail p
   await page.route('**/api/v1/economy/history?**', (route) => route.fulfill({
     json: { points, coverage: { start: points[0]!.date, end: points.at(-1)!.date } },
   }));
-  await page.goto('/');
+  await openNinjaPrices(page);
   await page.locator('.economy-item').first().click();
   await expect(page.getByText('History data (40 observations)', { exact: true })).toBeVisible();
   const start = page.getByRole('slider', { name: 'Period start', exact: true });
@@ -290,7 +307,7 @@ test('selected history dates persist across items, live leagues and archive data
     }));
     return route.fulfill({ json: { points, coverage: { start: points[0]!.date, end: points.at(-1)!.date } } });
   });
-  await page.goto('/');
+  await openNinjaPrices(page);
   await page.locator('.economy-item').filter({ hasText: "Gemcutter's Prism" }).click();
   const start = page.getByRole('slider', { name: 'Period start', exact: true });
   const end = page.getByRole('slider', { name: 'Period end', exact: true });
@@ -333,7 +350,7 @@ test('overview graph drag selects ordered periods and captures releases beyond e
   await page.route('**/api/v1/economy/history?**', (route) => route.fulfill({
     json: { points, coverage: { start: points[0]!.date, end: points.at(-1)!.date } },
   }));
-  await page.goto('/');
+  await openNinjaPrices(page);
   await page.locator('.economy-item').first().click();
   const graph = page.locator('.history-brush');
   const start = page.getByRole('slider', { name: 'Period start', exact: true });
@@ -368,7 +385,7 @@ test('overview graph drag selects ordered periods and captures releases beyond e
 
 test('history hover shows a guide and saved price at the nearest day in desktop and mobile layouts', async ({ page }) => {
   await service(page);
-  await page.goto('/');
+  await openNinjaPrices(page);
   await page.locator('.economy-item').first().click();
   const chart = page.getByRole('img', { name: 'Saved price history in Chaos Orb', exact: true });
   const tooltip = page.getByRole('tooltip');
@@ -407,7 +424,7 @@ test('price axes, point dots and compact volume graph follow the selected period
   await page.route('**/api/v1/economy/history?**', (route) => route.fulfill({
     json: { points, coverage: { start: points[0]!.date, end: points.at(-1)!.date } },
   }));
-  await page.goto('/');
+  await openNinjaPrices(page);
   await page.locator('.economy-item').first().click();
   await expect(page.locator('.history-period > p').first()).toHaveText('Selected period: 2026-07-14 – 2026-07-16');
   await expect(page.getByLabel('Price axis')).toHaveText('10 00015 00020 00025 00030 000');
@@ -438,10 +455,11 @@ test('historical datasets and import manager do not select an archived league fo
   await service(page);
   const selections: string[] = [];
   page.on('request', (request) => { if (request.url().endsWith('/selection')) selections.push(request.url()); });
-  await page.goto('/');
+  await openNinjaPrices(page);
   await page.getByRole('combobox', { name: 'League', exact: true }).selectOption('archive:Ancestors');
   await expect(page.locator('.app-header').getByRole('combobox', { name: 'As of', exact: true })).toHaveValue('2026-07-16');
-  await expect(page.getByRole('button', { name: 'Stash', exact: true })).toHaveAttribute('aria-pressed', 'true');
+  await page.getByRole('button', { name: 'poe.ninja Stash', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'poe.ninja Stash', exact: true })).toHaveAttribute('aria-pressed', 'true');
   await expect(page.getByRole('combobox', { name: 'League', exact: true })).toHaveValue('archive:Ancestors');
   await expect(page.getByRole('button', { name: 'Historical data', exact: true })).toHaveCount(0);
   await page.locator('.app-header').getByRole('button', { name: 'Settings', exact: true }).click();
@@ -475,7 +493,7 @@ test('shared dataset supports historical gem strategies and same-day materials w
         economyLine({ name: 'Vaal Orb', price: '4' })];
     return route.fulfill({ json: overview });
   });
-  await page.goto('/');
+  await openNinjaPrices(page);
   await expect(page.getByRole('combobox', { name: 'Economy dataset', exact: true })).toHaveCount(0);
   await page.getByRole('combobox', { name: 'League', exact: true }).selectOption('archive:Ancestors');
   await page.getByRole('button', { name: 'Gem flipping', exact: true }).click();
@@ -507,7 +525,7 @@ test('shared dataset supports historical gem strategies and same-day materials w
 
 test('archive Browse replaces the live date with an available historical date', async ({ page }) => {
   await service(page);
-  await page.goto('/');
+  await openNinjaPrices(page);
   await expect(page.locator('.economy-table tbody tr')).toHaveCount(2);
   await page.getByRole('button', { name: 'Settings', exact: true }).click();
   await page.getByRole('button', { name: 'Browse Ancestors', exact: true }).click();
@@ -519,7 +537,7 @@ test('archive Browse replaces the live date with an available historical date', 
 
 test('settings gear manages datasets from either tab and preserves price browsing context', async ({ page }) => {
   await service(page);
-  await page.goto('/');
+  await openNinjaPrices(page);
   await page.getByRole('combobox', { name: 'League', exact: true }).selectOption('archive:Ancestors');
   await expect(page.getByRole('combobox', { name: 'As of', exact: true })).toHaveValue('2026-07-16');
   const search = page.getByRole('searchbox', { name: 'Search economy items', exact: true });
@@ -568,7 +586,7 @@ test('settings polls active imports only while open and can retry a catalog fail
       ? route.fulfill({ status: 502, body: 'Catalog unavailable' })
       : route.fulfill({ json: [economyArchive('Mirage', 'importing')] });
   });
-  await page.goto('/');
+  await openNinjaPrices(page);
   await page.getByRole('button', { name: 'Settings', exact: true }).click();
   await expect(page.getByRole('alert')).toContainText('Unable to load archive status');
   await page.getByRole('button', { name: 'Discover dumps', exact: true }).click();
@@ -752,7 +770,7 @@ test('routed pages support deep links, reload and browser history while preservi
 
 test('price details and selected graph period survive route destruction and a direct price URL reloads', async ({ page }) => {
   await service(page);
-  await page.goto('/#/prices');
+  await openNinjaPrices(page, '/#/prices');
   await page.getByRole('combobox', { name: 'League', exact: true }).selectOption('archive:Ancestors');
   await expect(page.getByRole('combobox', { name: 'As of', exact: true })).toHaveValue('2026-07-16');
   await page.locator('.economy-table tbody tr').first().getByRole('button').click();
@@ -782,6 +800,7 @@ test('direct gem links load the shared datasets and price refresh preserves pinn
   await page.getByRole('combobox', { name: 'Gem price instant', exact: true }).selectOption('1');
   await expect(page.locator('.gem-table tbody tr')).toHaveCount(1);
   await page.getByRole('button', { name: 'Current prices', exact: true }).click();
+  await page.getByRole('button', { name: 'poe.ninja Exchange', exact: true }).click();
   await expect(page.locator('.economy-table tbody tr')).toHaveCount(2);
   const capture = page.waitForRequest((request) =>
     new URL(request.url()).pathname === '/api/v1/gem-analysis/refresh' && request.method() === 'POST');
@@ -802,11 +821,17 @@ test('direct gem links load the shared datasets and price refresh preserves pinn
 
 test('main tabs, league, refresh and settings share one row without a branding header', async ({ page }) => {
   await service(page);
-  await page.goto('/');
+  await openNinjaPrices(page);
   await expect(page.getByRole('button', { name: 'Refresh', exact: true })).toBeEnabled();
   await expect(page.getByText('Faust', { exact: true })).toHaveCount(0);
   const header = page.locator('.app-header');
   await expect(header.getByRole('navigation', { name: 'Market pages' })).toBeVisible();
+  await expect(header.getByRole('navigation', { name: 'Market pages' }).getByRole('button')).toHaveText([
+    'Current prices', 'Currency Exchange', 'Flip analysis', 'Gem flipping', 'Triangular arbitrage',
+  ]);
+  for (const name of ['Current prices', 'Currency Exchange', 'Triangular arbitrage']) {
+    await expect(header.getByRole('button', { name, exact: true })).toHaveCSS('color', 'rgb(239, 137, 200)');
+  }
   for (const width of [1280, 720, 390]) {
     await page.setViewportSize({ width, height: 800 });
     const centers = await header.locator('nav button, select, #refresh, .settings-button').evaluateAll((elements) =>

@@ -1,13 +1,13 @@
 <main pointerdown.trigger="gems?.closeGemTypesOutside($event)" browse-archive.trigger="browseArchive($event.detail)">
   <header class="app-header">
     <nav aria-label="Market pages">
-      <button class.bind="session.page === 'prices' ? 'active' : ''" aria-pressed.bind="session.page === 'prices'" click.trigger="router.load('/prices')">Current prices</button>
-      <button class.bind="session.page === 'gems' ? 'active' : ''" aria-pressed.bind="session.page === 'gems'" click.trigger="router.load('/gems')">Gem flipping</button>
-      <button class.bind="session.page === 'exchange' ? 'active' : ''" aria-pressed.bind="session.page === 'exchange'" click.trigger="router.load('/exchange')">Currency Exchange</button>
+      <button if.bind="devMode" class="dev-only-tab" class.bind="session.page === 'prices' ? 'active' : ''" aria-pressed.bind="session.page === 'prices'" click.trigger="router.load('/prices')">Current prices</button>
+      <button if.bind="devMode" class="dev-only-tab" class.bind="session.page === 'exchange' ? 'active' : ''" aria-pressed.bind="session.page === 'exchange'" click.trigger="router.load('/exchange')">Currency Exchange</button>
       <button class.bind="session.page === 'flips' ? 'active' : ''" aria-pressed.bind="session.page === 'flips'" click.trigger="router.load('/flips')">Flip analysis</button>
-      <button class.bind="session.page === 'triangular-arbitrage' ? 'active' : ''" aria-pressed.bind="session.page === 'triangular-arbitrage'" click.trigger="router.load('/triangular-arbitrage')">Triangular arbitrage</button>
+      <button class.bind="session.page === 'gems' ? 'active' : ''" aria-pressed.bind="session.page === 'gems'" click.trigger="router.load('/gems')">Gem flipping</button>
+      <button if.bind="devMode" class="dev-only-tab" class.bind="session.page === 'triangular-arbitrage' ? 'active' : ''" aria-pressed.bind="session.page === 'triangular-arbitrage'" click.trigger="router.load('/triangular-arbitrage')">Triangular arbitrage</button>
     </nav>
-    <label class="league-picker">League / dataset
+    <label class="league-picker">League
       <select aria-label="League" value.to-view="session.selectedDataset" change.trigger="selectDataset($event.target.value)">
         <option if.bind="!session.leagues.length" value="">Loading leagues...</option>
         <optgroup label="Live"><option repeat.for="league of session.leagues; key: id" value.bind="league.id">${league.name}</option></optgroup>

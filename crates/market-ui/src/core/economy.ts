@@ -125,7 +125,7 @@ export function historySeries(points: EconomyHistoryPoint[]): ChartSeries[] {
     sorted.forEach((point, index) => {
       const previous = sorted[index - 1];
       const threshold = point.granularity === 'daily' && previous?.granularity === 'daily'
-        ? 36 * 60 * 60_000 : 45 * 60_000;
+        ? 36 * 60 * 60_000 : point.granularity === 'hourly' ? 90 * 60_000 : 45 * 60_000;
       if (previous && (previous.granularity !== point.granularity
         || Date.parse(point.date) - Date.parse(previous.date) > threshold)) {
         if (segment.length) segments.push(segment.join(' '));

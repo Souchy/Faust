@@ -21,16 +21,22 @@
           <nav if.bind="selectedItem" class="economy-breadcrumb" aria-label="Item breadcrumb">
             <h1><button type="button" click.trigger="closeDetail()">${currentCategory.name ?? 'Economy'}</button><span aria-hidden="true"> &gt; </span><span aria-current="page">${selectedItem.name}</span></h1>
           </nav>
-          <p class="muted">poe.ninja ${source} estimates · ${browsingLeague}${historical ? ' · Historical' : ''} | Updated ${timestamp(overview.fetched_at)}</p>
+          <p class="muted">${sourceLabel} · ${browsingLeague}${historical ? ' · Historical' : ''} | Updated ${timestamp(overview.fetched_at)}</p>
         </div>
         <div class="source-tabs" aria-label="Price source">
           <button repeat.for="mode of availableSources" class.bind="source === mode ? 'active' : ''"
-            aria-pressed.bind="source === mode" click.trigger="selectSource(mode)">${mode === 'exchange' ? 'Exchange' : 'Stash'}</button>
+            aria-pressed.bind="source === mode" click.trigger="selectSource(mode)">${mode === 'ggg' ? 'GGG Exchange' : mode === 'exchange' ? 'poe.ninja Exchange' : 'poe.ninja Stash'}</button>
         </div>
       </div>
       <p if.bind="error" class="error" role="alert">${error} <button click.trigger="load()">Retry prices</button></p>
       <p if.bind="isLoading" class="muted" role="status">Loading ${currentCategory.name ?? 'economy'}...</p>
       <p if.bind="iconError" class="error" role="alert">${iconError}</p>
+      <p repeat.for="warning of warnings" class="muted" role="status">${warning}</p>
+      <p if.bind="source === 'ggg' && gggData.collection" class="muted" role="status">GGG ${gggData.current_league}: ${gggData.collection.status} · ${format(gggData.collection.completed_hours)} / ${format(gggData.collection.total_hours)} hours downloaded.${gggData.collection.status === 'cancelled' ? ' Automatic collection is paused; resume from Currency Exchange.' : ''}</p>
+      <p if.bind="source === 'ggg' && (gggData.collection_error || gggData.collection.error)" class="error" role="alert">${gggData.collection_error || gggData.collection.error}</p>
+      <p if.bind="source === 'ggg' && gggData.collection.warning" class="muted" role="status">${gggData.collection.warning}</p>
+      <p if.bind="comparisonError" class="error" role="alert">${comparisonError}</p>
+      <p if.bind="gggData && browsingLeague !== league" class="comparison-legend"><span>${browsingLeague}</span><span class="current-comparison">${league}</span> · Aligned by league age; shared price and volume scales.</p>
       <div show.bind="!selectedItem" class="economy-list">
         <div class="economy-filters">
           <input type="search" aria-label="Search economy items" placeholder="Search items or variants..." value.bind="search" input.trigger="updateLines()">
@@ -51,8 +57,8 @@
               <th repeat.for="column of columns" aria-sort.bind="sortColumn === column.id ? ascending ? 'ascending' : 'descending' : 'none'">
                 <button click.trigger="sort(column.id)">${column.label}${sortColumn === column.id ? ascending ? ' ^' : ' v' : ''}</button>
               </th>
-              <th if.bind="source === 'exchange'"><button click.trigger="sort('volume')">Volume (${overview.quote_currency ?? 'native'})</button></th>
-              <th if.bind="source === 'exchange'">Dominant pair</th>
+              <th if.bind="source !== 'stash'"><button click.trigger="sort('volume')">Volume (${source === 'ggg' ? 'item units/hour' : overview.quote_currency ?? 'native'})</button></th>
+              <th if.bind="source !== 'stash'">Dominant pair</th>
               <th if.bind="source === 'stash'"><button click.trigger="sort('listings')">Listings</button></th>
             </tr></thead>
             <tbody><tr repeat.for="line of rows">
@@ -63,12 +69,18 @@
               <td class="price-cell">${format(price(line))}<small>${quoteLabel}</small></td>
               <td>
                 <span class.bind="trendClass(line)">${line.change != null ? format(line.change) + '%' : '-'}</span>
-                <svg if.bind="line.sparkline.length" class.bind="'sparkline ' + trendClass(line)" viewBox="0 0 110 28" role="img" aria-label.bind="'Recent trend for ' + line.name">
+                <svg if.bind="line.sparkline.length && !tableCharts[line.id]" class.bind="'sparkline ' + trendClass(line)" viewBox="0 0 110 28" role="img" aria-label.bind="'Recent trend for ' + line.name">
                   <path d.bind="chartPath(sparks(line.sparkline)) & attr"></path>
                 </svg>
+                <svg if.bind="tableCharts[line.id]" class="sparkline ggg-trend" viewBox="0 0 800 200" preserveAspectRatio="none" role="img" aria-label.bind="'League-age price trend for ' + line.name">
+                  <path class="history-price-line" d.bind="chartPath(tableCharts[line.id].segments) & attr"></path>
+                  <path class="history-dots" d.bind="tableCharts[line.id].dots & attr"></path>
+                  <path class="current-comparison-line" d.bind="chartPath(tableCharts[line.id].currentSegments) & attr"></path>
+                  <path class="current-comparison-dots" d.bind="tableCharts[line.id].currentDots & attr"></path>
+                </svg>
               </td>
-              <td if.bind="source === 'exchange'">${format(line.volume)}</td>
-              <td if.bind="source === 'exchange'">${format(line.pair_rate)} ${line.pair ?? ''}</td>
+              <td if.bind="source !== 'stash'">${format(line.volume)}</td>
+              <td if.bind="source !== 'stash'">${format(line.pair_rate)} ${line.pair ?? ''}</td>
               <td if.bind="source === 'stash'">${format(line.listings)}<small if.bind="line.samples != null">${format(line.samples)} samples</small></td>
             </tr></tbody>
           </table>
@@ -84,9 +96,9 @@
         </div>
         <dl class="item-stats">
           <dt>Source</dt><dd>${source} · ${browsingLeague}${date ? ' · ' + date : ''}</dd>
-          <dt>Native estimate</dt><dd>${format(selectedItem.price)} ${overview.quote_currency}</dd>
+          <dt>${source === 'ggg' ? 'Hourly traded price' : 'Native estimate'}</dt><dd>${format(selectedItem.price)} ${overview.quote_currency}</dd>
           <dt if.bind="selectedItem.listings != null">Listings</dt><dd if.bind="selectedItem.listings != null">${format(selectedItem.listings)}</dd>
-          <dt if.bind="selectedItem.volume != null">Volume</dt><dd if.bind="selectedItem.volume != null">${format(selectedItem.volume)} ${overview.quote_currency}</dd>
+          <dt if.bind="selectedItem.volume != null">Volume</dt><dd if.bind="selectedItem.volume != null">${format(selectedItem.volume)} ${source === 'ggg' ? 'item units/hour' : overview.quote_currency}</dd>
           <dt if.bind="selectedItem.base_type">Base type</dt><dd if.bind="selectedItem.base_type">${selectedItem.base_type}</dd>
         </dl>
         <details if.bind="itemMetadata.length"><summary>Item properties and modifiers</summary><dl class="item-stats"><template repeat.for="entry of itemMetadata"><dt>${entry.label}</dt><dd class="metadata-value">${entry.value}</dd></template></dl></details>
@@ -96,7 +108,7 @@
         </div>
         <p if.bind="historyLoading" role="status">Loading history...</p>
         <p if.bind="historyError" class="error" role="alert">${historyError} <button click.trigger="loadHistory()">Retry history</button></p>
-        <p if.bind="history && !history.points.length" class="empty">No saved history for this exact item variant yet. Recent provider trend samples are shown below when available.</p>
+        <p if.bind="history && !history.points.length" class="empty">No saved history for this exact item variant yet.${source === 'ggg' ? '' : ' Recent provider trend samples are shown below when available.'}</p>
         <section if.bind="historyDates.length" class="history-period" aria-label="Graph period selection">
           <p>Selected period: <strong>${periodDate(historyDates[periodStart])}</strong> – <strong>${periodDate(historyDates[periodEnd])}</strong></p>
           <div class="history-brush"
@@ -126,6 +138,8 @@
                 <path class="history-grid" d.bind="chart.grid & attr"></path>
                 <path class="history-price-line" d.bind="chartPath(chart.segments) & attr"></path>
                 <path class="history-dots" d.bind="chart.dots & attr"></path>
+                <path class="current-comparison-line" d.bind="chartPath(chart.currentSegments) & attr"></path>
+                <path class="current-comparison-dots" d.bind="chart.currentDots & attr"></path>
                 <path class="history-guide" d.bind="(hoveredCurrency === chart.currency && hoveredPoint ? 'M' + hoveredPoint.x + ',0 V200' : '') & attr"></path>
                 <circle cx.bind="(hoveredPoint ? hoveredPoint.x : 0) & attr" cy.bind="(hoveredPoint ? hoveredPoint.y : 0) & attr" r.bind="(hoveredCurrency === chart.currency && hoveredPoint ? 4 : 0) & attr"></circle>
               </svg>
@@ -136,12 +150,13 @@
             </div>
           </div>
           <div class="history-volume" role="region" aria-label.bind="'Volume history in ' + chart.currency">
-            <div class="toolbar"><strong>Volume (${chart.currency})</strong><span if.bind="chart.volume.count">Max ${format(chart.volume.max)}</span></div>
+            <div class="toolbar"><strong>Volume (${source === 'ggg' ? 'item units/hour' : chart.currency})</strong><span if.bind="chart.volume.count">Max ${format(chart.volume.max)}</span></div>
             <svg if.bind="chart.volume.count" viewBox="0 0 800 60" preserveAspectRatio="none" role="img" aria-label.bind="'Recorded volume in ' + chart.currency">
               <path class="history-volume-bars" d.bind="chart.volume.bars & attr"></path>
+              <path if.bind="chart.currentVolume" class="current-comparison-volume" d.bind="chart.currentVolume & attr"></path>
             </svg>
             <p if.bind="!chart.volume.count" class="muted volume-unavailable">No recorded volume for this period. Historical dumps and older snapshots do not include volume.</p>
-            <p if.bind="chart.volume.count" class="muted">Provider-reported volume at each snapshot; not a sum of daily trades. Missing observations stay blank.</p>
+            <p if.bind="chart.volume.count" class="muted">${source === 'ggg' ? 'Item units traded during each hour in the selected pair.' : 'Provider-reported volume at each snapshot; not a sum of daily trades.'} Missing observations stay blank.</p>
           </div>
         </div>
         <div if.bind="!history.points.length && selectedItem.sparkline.length" class="history-chart">

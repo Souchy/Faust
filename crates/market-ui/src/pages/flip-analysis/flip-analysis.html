@@ -11,11 +11,15 @@
         <p>Strict start date is off by default. When checked, items must have a positive price in the selected start hour (or selected UTC dataset day for archives); later starting prices are not substituted. The selected end always remains strict.</p>
         <p>Cluster jewel names include poe.ninja item-level brackets. Archive brackets are recovered only from matching provider IDs, names and variants in saved metadata; missing or ambiguous levels are shown as unknown. Prices and variant identities are unchanged.</p>
         <p>Row volume shows item units traded in the starting and ending GGG hours for the selected pair, not total trades across the period. Unknown volume is not zero.</p>
-        <p>Confidence shows poe.ninja provider labels at the start → end; missing labels are Unknown. GGG confidence is not applicable (—): actual traded volume is shown separately.</p>
+        <p>The Volume / confidence column shows GGG traded item units or poe.ninja provider confidence labels at the start → end. Missing confidence labels are Unknown. Hover over the cell for source-specific details.</p>
         <p id="confidence-scope">Minimum confidence filters poe.ninja/archive rows only. Either actual starting or ending observation can meet the chosen level; Unknown cannot qualify by itself. All confidence levels disables the filter, including Unknown. GGG rows remain unaffected, just as poe.ninja rows are unaffected by the GGG volume filter. Confidence labels are not averaged across the period.</p>
         <p>Charts load separately after ranking, for the displayed page only. They show historical Chaos prices, not percentage changes or a fabricated endpoint trend. At most 60 evenly spaced saved hours/days use their actual times; gaps at sampled observations are not interpolated. Unsampled fluctuations and gaps are not represented. A dot means an isolated observation, not a trend. Hover over a chart cell for its coverage warnings.</p>
+        <p>Current-league availability checks the retained live league (${currentLeagueName}), even while browsing a historical dataset. It uses saved poe.ninja snapshots only, in one batch for the displayed page; it never queries live trade listings. Exact item variants are matched, not provider IDs across leagues. Not observed does not mean an item cannot drop or be traded. Listing counts are provider-reported, not purchasable stock; missing counts are unknown, not zero. The update age refers to the saved snapshot, not a new provider check.</p>
+        <p>The current-league presence filter applies before pagination across all matching results. Unknown means saved data or a reliable identity is missing; ambiguous variants are separate. The sparkline beside the current price shows poe.ninja's recent relative trend from that same snapshot, not the historical analysis period or absolute Chaos prices. Missing trend samples are gaps.</p>
         <p id="flip-date-format">Enter local dates and times as yyyy-mm-dd hh:mm. Dates are clamped to the known league window; calendar buttons and the band use the same bounds. Analyze reloads those bounds after history imports. Individual items can start later, but still require a price at the selected end.</p>
         <p>Drag a handle to adjust an endpoint, or drag the selected band to move the period. Wheel: zoom. Shift-wheel / background drag: pan. Focus a handle to adjust it with the keyboard.</p>
+        <p>The pink line marks the selected league's launch plus the retained current league's elapsed age. It updates every minute without changing the selected dates. Approximate means an earliest known dataset date substitutes for an unavailable official launch time. Markers outside the available period or zoom are not pinned to an edge.</p>
+        <p>Selected dates, zoom/pan, and all filters are saved per league in client settings and restored on your next visit. Reset zoom is saved too; zooming does not change the selected analysis dates.</p>
         <p if.bind="canAnalyze && start && end">${availabilityMessage}</p>
         <ul if.bind="period" class="warnings" aria-label="Period coverage notices"><li repeat.for="warning of period.warnings">${warning}</li></ul>
         <template if.bind="result">
@@ -29,8 +33,8 @@
     <div class="historical-date-control">
       <label for="flip-start">Start (local)</label>
       <div class="iso-date-input">
-        <input id="flip-start" aria-label="Flip start" aria-describedby="flip-date-format" type="text" placeholder="yyyy-mm-dd hh:mm" title="yyyy-mm-dd hh:mm (local time)" pattern="[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}" value.bind="startText" input.trigger="cancelSparklines()" disabled.bind="!canAnalyze" required>
-        <input class="native-date-picker" ref="startPicker" type="datetime-local" step="3600" min.bind="minInput" max.bind="maxInput" value.bind="start" input.trigger="cancelSparklines()" disabled.bind="!canAnalyze" tabindex="-1" aria-hidden="true">
+        <input id="flip-start" aria-label="Flip start" aria-describedby="flip-date-format" type="text" placeholder="yyyy-mm-dd hh:mm" title="yyyy-mm-dd hh:mm (local time)" pattern="[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}" value.bind="startText" input.trigger="cancelSparklines()" change.trigger="savePeriod()" disabled.bind="!canAnalyze" required>
+        <input class="native-date-picker" ref="startPicker" type="datetime-local" step="3600" min.bind="minInput" max.bind="maxInput" value.bind="start" input.trigger="cancelSparklines()" change.trigger="savePeriod()" disabled.bind="!canAnalyze" tabindex="-1" aria-hidden="true">
         <button type="button" aria-label="Choose start date and time" title="Choose start date and time" disabled.bind="!canAnalyze" click.trigger="startPicker.showPicker()">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="3" y="5" width="18" height="16" rx="2"></rect><path d="M7 3v4M17 3v4M3 11h18"></path></svg>
         </button>
@@ -39,30 +43,40 @@
     <div class="historical-date-control">
       <label for="flip-end">End (local)</label>
       <div class="iso-date-input">
-        <input id="flip-end" aria-label="Flip end" aria-describedby="flip-date-format" type="text" placeholder="yyyy-mm-dd hh:mm" title="yyyy-mm-dd hh:mm (local time)" pattern="[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}" value.bind="endText" input.trigger="cancelSparklines()" disabled.bind="!canAnalyze" required>
-        <input class="native-date-picker" ref="endPicker" type="datetime-local" step="3600" min.bind="minInput" max.bind="maxInput" value.bind="end" input.trigger="cancelSparklines()" disabled.bind="!canAnalyze" tabindex="-1" aria-hidden="true">
+        <input id="flip-end" aria-label="Flip end" aria-describedby="flip-date-format" type="text" placeholder="yyyy-mm-dd hh:mm" title="yyyy-mm-dd hh:mm (local time)" pattern="[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}" value.bind="endText" input.trigger="cancelSparklines()" change.trigger="savePeriod()" disabled.bind="!canAnalyze" required>
+        <input class="native-date-picker" ref="endPicker" type="datetime-local" step="3600" min.bind="minInput" max.bind="maxInput" value.bind="end" input.trigger="cancelSparklines()" change.trigger="savePeriod()" disabled.bind="!canAnalyze" tabindex="-1" aria-hidden="true">
         <button type="button" aria-label="Choose end date and time" title="Choose end date and time" disabled.bind="!canAnalyze" click.trigger="endPicker.showPicker()">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="3" y="5" width="18" height="16" rx="2"></rect><path d="M7 3v4M17 3v4M3 11h18"></path></svg>
         </button>
       </div>
     </div>
-    <label>Minimum starting price (Chaos) <input aria-label="Minimum starting price (Chaos)" inputmode="decimal" value.bind="minPrice" input.trigger="cancelSparklines()"></label>
-    <label>Maximum starting price (Chaos) <input aria-label="Maximum starting price (Chaos)" inputmode="decimal" value.bind="maxPrice" input.trigger="cancelSparklines()"></label>
-    <label>Minimum GGG item volume <input aria-label="Minimum exchange item volume" aria-describedby="volume-scope" inputmode="decimal" value.bind="minVolume" input.trigger="cancelSparklines()"></label>
+    <label>Minimum starting price (Chaos) <input aria-label="Minimum starting price (Chaos)" inputmode="decimal" value.bind="minPrice" input.trigger="filterEdited()"></label>
+    <label>Maximum starting price (Chaos) <input aria-label="Maximum starting price (Chaos)" inputmode="decimal" value.bind="maxPrice" input.trigger="filterEdited()"></label>
+    <label>Minimum GGG item volume <input aria-label="Minimum exchange item volume" aria-describedby="volume-scope" inputmode="decimal" value.bind="minVolume" input.trigger="filterEdited()"></label>
     <label>Minimum poe.ninja confidence <select aria-label="Minimum poe.ninja confidence" aria-describedby="confidence-scope" value.bind="minConfidence" change.trigger="refresh()">
       <option value="">All confidence levels</option><option value="Low">Low or higher</option><option value="Medium">Medium or higher</option><option value="High">High only</option>
     </select></label>
     <label><input type="checkbox" checked.bind="strictStart" change.trigger="refresh()" disabled.bind="periodLoading || !canAnalyze"> Strict start date</label>
+    <label>Current-league presence <select aria-label="Current-league presence" value.bind="presence" change.trigger="refresh()" disabled.bind="periodLoading || !canAnalyze">
+      <option value="">All items</option><option value="observed">Observed</option>
+      <option value="not_observed">Not observed</option><option value="unknown">Unknown / no snapshot</option>
+      <option value="ambiguous">Ambiguous variant</option>
+    </select></label>
     <button type="submit" disabled.bind="isLoading || periodLoading || !canAnalyze || !start || !end">Analyze flips</button>
   </form>
   <period-band if.bind="canAnalyze && start && end" min.bind="minimum" max.bind="maximum"
     available-hours.bind="period.hours" available-days.bind="period.days" selected-start.bind="selectedStart" selected-end.bind="selectedEnd"
-    commit.bind="range => commitPeriod(range)"></period-band>
+    commit.bind="range => commitPeriod(range)" viewport.bind="viewport" view-commit.bind="range => commitViewport(range)"
+    reference-time.bind="referenceTime" reference-label.bind="referenceLabel"></period-band>
+  <small if.bind="referenceError" role="status">${referenceError}</small>
   <p if.bind="periodLoading || !canAnalyze || !start || !end" class="muted" role="status">${availabilityMessage}</p>
   <p if.bind="error" role="alert" class="error">${error}</p>
+  <p if.bind="settingsError" role="alert" class="error">${settingsError}</p>
   <p if.bind="isLoading" role="status">Analyzing saved endpoints…</p>
   <p if.bind="chartsLoading" role="status">Loading historical charts… Ranking is ready.</p>
   <p if.bind="chartError" role="alert" class="error">${chartError}</p>
+  <p if.bind="currentAvailabilityLoading" role="status">Checking current-league poe.ninja data… Ranking is ready.</p>
+  <p if.bind="currentAvailabilityError" role="alert" class="error">${currentAvailabilityError}</p>
   <template if.bind="result">
     <div class="historical-controls">
       <label>Search <input aria-label="Search flips" type="search" value.bind="search" input.trigger="searchChangedByUser()"></label>
@@ -70,12 +84,32 @@
       <label>Venue <select aria-label="Flip venue" value.bind="venue" change.trigger="refresh()"><option value="">All venues</option><option value="exchange">Exchange</option><option value="trade">Trade</option></select></label>
       <label>Sort <select aria-label="Flip sort" value.bind="sort" change.trigger="refresh()"><option value="percent-desc">Growth % descending</option><option value="percent-asc">Growth % ascending</option><option value="value-desc">Growth Chaos descending</option><option value="value-asc">Growth Chaos ascending</option></select></label>
     </div>
-    <div class="table-scroll"><table aria-label="Ranked flips">
-      <thead><tr><th>Item / source</th><th>Starting Chaos</th><th>Ending Chaos</th><th>Growth Chaos</th><th>Growth %</th><th title="Selected pair item units traded in each endpoint hour, not a period total">Item volume (start → end)</th><th>Confidence (start → end)</th><th>Historical Chaos</th></tr></thead>
+    <div class="table-scroll"><table class="flip-results" aria-label="Ranked flips">
+      <thead><tr><th>Item / source</th><th>Current league <small>${currentLeagueName}</small></th><th>Chaos (start → end)</th><th>Growth Chaos</th><th>Growth %</th><th title="Start → end: GGG traded item units (not a period total), or poe.ninja provider confidence">Volume / confidence</th><th>Historical Chaos</th></tr></thead>
       <tbody><template repeat.for="row of visibleRows; key: id">
         <tr><td><button class="flip-item-name" aria-expanded.bind="expanded.includes(row.id)" click.trigger="toggle(row.id)">${row.name}</button><small>${row.category} · ${row.venue} · ${row.source}</small></td>
-          <td title.bind="row.start_price"><span>${format(row.start_price)}</span><small>${row.history_granularity === 'daily' ? row.start_observed_at + ' (UTC day)' : timestamp(row.start_observed_at)}</small></td><td title.bind="row.end_price">${format(row.end_price)}</td><td title.bind="row.growth">${format(row.growth)}</td><td title.bind="row.growth_percent">${format(row.growth_percent)}%</td><td title.bind="volumeTitle(row)">${volume(row)}</td>
-          <td class="flip-confidence" title.bind="confidenceTitle(row)">${confidence(row)}</td>
+          <td class="flip-current-availability" title.bind="currentAvailability[row.id] ? currentAvailability[row.id].detail : ''">
+            <template if.bind="currentAvailability[row.id]">
+              <template if.bind="currentAvailability[row.id].status === 'observed'">
+                <div class="current-league-quote">
+                <span class="current-league-summary" title.bind="'poe.ninja ' + currentAvailability[row.id].source + (currentAvailability[row.id].fetched_at ? ' · ' + timestamp(currentAvailability[row.id].fetched_at) : '')">
+                  <span>${currentAvailability[row.id].price !== null ? format(currentAvailability[row.id].price) + 'c' : 'Price unknown'}</span>
+                  <small>${currentAvailability[row.id].listings !== null ? format(currentAvailability[row.id].listings) + ' listings' : '? listings'} ${currentAvailability[row.id].fetched_at ? availabilityAge(currentAvailability[row.id].fetched_at) : 'Update time unknown'}</small>
+                </span>
+                <svg if.bind="currentTrends[row.id] && (currentTrends[row.id].paths.length || currentTrends[row.id].dots.length)" class="current-league-sparkline" viewBox="0 0 120 36" role="img" aria-label.bind="'Current league recent poe.ninja trend for ' + row.name">
+                  <title>Recent poe.ninja relative trend from the same snapshot as the current price. Not the historical analysis period; gaps are not interpolated.</title>
+                  <path repeat.for="path of currentTrends[row.id].paths" d.bind="path & attr"></path>
+                  <circle repeat.for="dot of currentTrends[row.id].dots" cx.bind="dot.x & attr" cy.bind="dot.y & attr" r="2"></circle>
+                </svg>
+                </div>
+              </template>
+              <span else>${currentAvailability[row.id].status === 'not_observed' ? 'Not observed' : currentAvailability[row.id].status === 'ambiguous' ? 'Ambiguous variant' : 'Unknown'}</span>
+              <small if.bind="currentAvailability[row.id].status !== 'observed' && currentAvailability[row.id].fetched_at" title.bind="timestamp(currentAvailability[row.id].fetched_at)">${availabilityAge(currentAvailability[row.id].fetched_at)}</small>
+            </template>
+            <small else>${currentAvailabilityLoading ? 'Checking…' : currentAvailabilityError ? 'Check failed' : 'Not checked'}</small>
+          </td>
+          <td title.bind="row.start_price + ' → ' + row.end_price"><span>${format(row.start_price)} → ${format(row.end_price)}</span><small if.bind="hasDifferentStart(row)">${row.history_granularity === 'daily' ? row.start_observed_at + ' (UTC day)' : timestamp(row.start_observed_at)}</small></td><td title.bind="row.growth">${format(row.growth)}</td><td title.bind="row.growth_percent">${format(row.growth_percent)}%</td>
+          <td title.bind="row.source === 'GGG Exchange' ? volumeTitle(row) : confidenceTitle(row)">${row.source === 'GGG Exchange' ? volume(row) : confidence(row)}</td>
           <td class="flip-chart-cell" title.bind="charts[row.id] ? charts[row.id].warnings.join('\n') : ''">
             <template if.bind="charts[row.id]">
               <svg if.bind="charts[row.id].paths.length || charts[row.id].dots.length" class="flip-sparkline" viewBox="0 0 120 36" role="img" aria-label.bind="row.name + ': ' + charts[row.id].title">
@@ -87,7 +121,7 @@
             </template>
             <small else>${chartsLoading ? 'Loading…' : chartError ? 'Chart unavailable' : 'Not loaded'}</small>
           </td></tr>
-        <tr if.bind="expanded.includes(row.id)"><td colspan="8" class="analysis-detail">
+        <tr if.bind="expanded.includes(row.id)"><td colspan="7" class="analysis-detail">
           <p>Selected pair: ${row.pair} · ${row.source}</p>
           <p if.bind="row.native_start !== undefined">Original native price: <span title.bind="row.native_start">${format(row.native_start)}</span> → <span title.bind="row.native_end">${format(row.native_end)}</span> · ${row.pair}</p>
           <p>Actual observations: ${timestamp(row.start_observed_at)} → ${timestamp(row.end_observed_at)}</p>
@@ -115,7 +149,7 @@
           </template>
           <a load="route: /prices; context.bind: null">Inspect underlying poe.ninja charts in Current prices</a>
         </td></tr>
-      </template><tr if.bind="!rows.length"><td colspan="8">No valid matching ranked items. Check saved prices inside the period, selected-end coverage and filters. Review coverage notices and excluded items below.</td></tr></tbody>
+      </template><tr if.bind="!rows.length"><td colspan="7">No valid matching ranked items. Check saved prices inside the period, selected-end coverage and filters. Review coverage notices and excluded items below.</td></tr></tbody>
     </table></div>
     <p>Showing ${result.total ? result.offset + 1 : 0}–${result.offset + result.rows.length} of ${result.total} matching items.</p>
     <button disabled.bind="isLoading || !offset" click.trigger="changePage(-1)">Previous 100 flips</button>

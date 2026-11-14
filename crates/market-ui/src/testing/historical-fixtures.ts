@@ -1,4 +1,4 @@
-import type { AnalysisPeriod, ArbitrageAnalysis, FlipAnalysis, FlipRow, FlipSparklines, GggCoverage, GggHistory, GggImportJob, GggMarket, GggOverview } from '../core/api-types';
+import type { AnalysisPeriod, ArbitrageAnalysis, CurrentAvailability, FlipAnalysis, FlipRow, FlipSparklines, GggCoverage, GggHistory, GggImportJob, GggMarket, GggOverview } from '../core/api-types';
 
 export const historicalHour = 1794412800;
 export function analysisPeriod(league = 'Standard'): AnalysisPeriod {
@@ -38,6 +38,7 @@ export function flipAnalysis(start = historicalHour - 24 * 3600, end = historica
     id: 'divine', name: 'Divine Orb', category: 'Currency', venue: 'exchange' as const, source: 'GGG Exchange',
     start_price: '100', end_price: '120', growth: '20', growth_percent: '20',
     native_start: '100', native_end: '120',
+    item_identity: { name: 'Divine Orb' },
     start_observed_at: new Date(start * 1000).toISOString(), end_observed_at: new Date(end * 1000).toISOString(),
     pair: 'divine|chaos', alternatives: [{
       market: 'divine|chaos', quote: 'Chaos Orb', native_start: '100', native_end: '120', start_price: '100',
@@ -46,7 +47,7 @@ export function flipAnalysis(start = historicalHour - 24 * 3600, end = historica
   };
   return { league: 'Standard', start, end, total: 2, offset: 0, limit: 100, excluded_total: 1, categories: ['Currency', 'Oils'], rows: [row, { ...row, id: 'oil', name: 'Golden Oil', category: 'Oils',
     source: 'poe.ninja dump', venue: 'trade', start_price: '10', end_price: '15', growth: '5', growth_percent: '50',
-    pair: 'Chaos Orb', alternatives: [], native_start: '10', native_end: '15',
+    pair: 'Chaos Orb', alternatives: [], native_start: '10', native_end: '15', item_identity: { name: 'Golden Oil' },
     history_category: 'Oil', history_source: 'stash', history_item: 'golden-oil',
     history_archive: 'Standard', history_granularity: 'daily', start_confidence: 'High', end_confidence: 'Low' }],
   warnings: ['Only saved in-period starts and selected-end observations are ranked.'], excluded: [{ name: 'Silver Oil', reason: 'Missing end observation' }] };
@@ -60,6 +61,14 @@ export function flipSparklines(rows: FlipRow[], start = historicalHour - 86400, 
     { time: start + span * 3 / 4, price: row.end_price },
     { time: end, price: row.end_price },
   ] })) };
+}
+export function currentAvailability(league: string, rows: FlipRow[]): CurrentAvailability {
+  return { league, items: rows.map(row => ({
+    id: row.id, status: 'observed', price: '125.5', listings: row.source === 'GGG Exchange' ? null : 42,
+    fetched_at: '2026-11-13T20:00:00Z', source: row.source === 'GGG Exchange' ? 'exchange' : 'stash',
+    detail: 'Saved poe.ninja observation, not a live stock guarantee.',
+    sparkline: ['0', '5', null, '-2', '3'],
+  })) };
 }
 export function arbitrageAnalysis(hour = historicalHour): ArbitrageAnalysis {
   return { league: 'Standard', hour, complete: false, warnings: ['Missing native market observations.'], loops: [{

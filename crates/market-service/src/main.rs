@@ -89,11 +89,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 state.clone(),
                 selected_league_rx.clone(),
             ));
+            let ggg_collector = tokio::spawn(market_service::ggg::collect(
+                state.clone(),
+                selected_league_rx.clone(),
+            ));
             let collector = tokio::spawn(economy::collect(state.clone(), selected_league_rx));
             let result = axum::serve(listener, router(state).layer(cors_layer(allow_origin)))
                 .with_graceful_shutdown(shutdown_signal())
                 .await;
             collector.abort();
+            ggg_collector.abort();
             gem_collector.abort();
             result?;
         }

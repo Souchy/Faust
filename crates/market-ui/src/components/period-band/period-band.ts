@@ -15,7 +15,15 @@ export function observationPoints(hours: number[], days: string[]): number[] {
 }
 
 export class PeriodBand {
-  static get bindables(): string[] { return ['min', 'max', 'availableHours', 'availableDays', 'selectedStart', 'selectedEnd', 'commit']; }
+  static get bindables(): string[] { return ['min', 'max', 'availableHours', 'availableDays', 'selectedStart', 'selectedEnd', 'commit', 'viewport', 'viewCommit', 'referenceTime', 'referenceLabel']; }
+  referenceTime: number | null = null;
+  referenceLabel = '';
+  get referenceVisible(): boolean {
+    return this.referenceTime !== null && Number.isFinite(this.referenceTime)
+      && this.referenceTime >= this.min && this.referenceTime <= this.max
+      && this.referenceTime >= this.viewStart && this.referenceTime <= this.viewEnd;
+  }
+  get referenceX(): number { return this.x(this.referenceTime ?? this.min); }
   min = 0;
   max = 0;
   availableHours: number[] = [];
@@ -23,6 +31,8 @@ export class PeriodBand {
   selectedStart = 0;
   selectedEnd = 0;
   commit: (range: { start: number; end: number }) => void = () => {};
+  viewport: { start: number; end: number } | null = null;
+  viewCommit: (range: { start: number; end: number } | null) => void = () => {};
   svg!: SVGSVGElement;
   viewStart = 0;
   viewEnd = 0;
@@ -30,14 +40,15 @@ export class PeriodBand {
   draftEnd = 0;
   private drag: { pointer: number; kind: string; x: number; start: number; end: number; viewStart: number; viewEnd: number } | null = null;
   private readonly wheelListener = (event: WheelEvent) => this.wheel(event);
-  bound(): void { this.resetZoom(); this.sync(); }
+  bound(): void { this.restoreZoom(); this.sync(); }
   attached(): void { this.svg.addEventListener('wheel', this.wheelListener, { passive: false }); }
   detaching(): void {
     this.svg.removeEventListener('wheel', this.wheelListener);
     this.cancelDrag();
   }
-  minChanged(): void { this.cancelDrag(); this.resetZoom(); }
-  maxChanged(): void { this.cancelDrag(); this.resetZoom(); }
+  minChanged(): void { this.cancelDrag(); this.restoreZoom(); }
+  maxChanged(): void { this.cancelDrag(); this.restoreZoom(); }
+  viewportChanged(): void { if (!this.drag) this.restoreZoom(); }
   selectedStartChanged(): void { this.sync(); }
   selectedEndChanged(): void { this.sync(); }
   private sync(): void { if (!this.drag) { this.draftStart = this.selectedStart; this.draftEnd = this.selectedEnd; } }
@@ -57,7 +68,15 @@ export class PeriodBand {
   get startX(): number { return clamp(this.x(this.draftStart), 6, 994) - 6; }
   get endX(): number { return clamp(this.x(this.draftEnd), 6, 994) - 6; }
   label = localDate;
-  resetZoom(): void { this.viewStart = this.min; this.viewEnd = this.max; }
+  resetZoom(): void { this.viewStart = this.min; this.viewEnd = this.max; this.viewCommit(null); }
+  private restoreZoom(): void {
+    if (this.max <= this.min) return;
+    if (this.viewport && Number.isFinite(this.viewport.start) && Number.isFinite(this.viewport.end)
+      && this.viewport.end > this.viewport.start) {
+      this.setView(this.viewport.start, this.viewport.end - this.viewport.start);
+    } else { this.viewStart = this.min; this.viewEnd = this.max; }
+  }
+  private commitView(): void { this.viewCommit({ start: this.viewStart, end: this.viewEnd }); }
   private setView(start: number, span: number): void {
     span = clamp(span, Math.min(2 * HOUR, this.max - this.min), this.max - this.min);
     this.viewStart = clamp(start, this.min, this.max - span);
@@ -79,6 +98,7 @@ export class PeriodBand {
       this.setView(this.viewStart + anchor * (span - next), next);
     }
     event.preventDefault();
+    this.commitView();
   }
   pointerDown(event: PointerEvent, kind: string): void {
     if (event.button !== 0 || this.max <= this.min || this.drag) return;
@@ -101,9 +121,11 @@ export class PeriodBand {
   }
   pointerUp(event: PointerEvent): void {
     if (!this.drag || this.drag.pointer !== event.pointerId) return;
+    const panned = this.drag.kind === 'pan' && (this.viewStart !== this.drag.viewStart || this.viewEnd !== this.drag.viewEnd);
     const changed = this.drag.kind !== 'pan' && (this.draftStart !== this.selectedStart || this.draftEnd !== this.selectedEnd);
     this.cancelDrag();
     if (changed) this.commit({ start: this.draftStart, end: this.draftEnd });
+    if (panned) this.commitView();
   }
   pointerCancel(): void { if (this.drag) { this.cancelDrag(); this.sync(); } }
   private cancelDrag(): void {

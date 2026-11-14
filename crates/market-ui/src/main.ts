@@ -2,6 +2,7 @@ import Aurelia, { Registration } from 'aurelia';
 import { RouterConfiguration } from '@aurelia/router';
 import { MarketApi } from './core/market-api';
 import { MarketSession } from './services/market-session';
+import { ClientSettings } from './services/client-settings';
 import { MarketApp } from './market-app';
 import './styles.css';
 
@@ -11,6 +12,7 @@ async function start(): Promise<void> {
       RouterConfiguration.customize({ useUrlFragmentHash: true, basePath: '/' }),
       Registration.singleton(MarketApi, MarketApi),
       Registration.singleton(MarketSession, MarketSession),
+      Registration.singleton(ClientSettings, ClientSettings),
     )
     .app(MarketApp)
     .start();

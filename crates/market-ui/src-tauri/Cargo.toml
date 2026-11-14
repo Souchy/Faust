@@ -17,6 +17,8 @@ axum.workspace = true
 market-service = { path = "../../market-service" }
 market-store = { path = "../../market-store" }
 serde_json.workspace = true
+serde.workspace = true
+tempfile = "3.20"
 tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
 tauri-plugin-updater = "2"
@@ -24,7 +26,6 @@ tokio.workspace = true
 
 [dev-dependencies]
 reqwest.workspace = true
-tempfile = "3.20"
 
 [features]
 custom-protocol = ["tauri/custom-protocol"]

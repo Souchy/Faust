@@ -1,19 +1,29 @@
 import { expect, test, type Page } from '@playwright/test';
 import { status } from '../src/testing/fixtures';
-import { analysisPeriod, arbitrageAnalysis, flipAnalysis, flipSparklines, gggCoverage, gggHistory, gggJob, gggOverview } from '../src/testing/historical-fixtures';
+import { analysisPeriod, arbitrageAnalysis, currentAvailability, flipAnalysis, flipSparklines, gggCoverage, gggHistory, gggJob, gggOverview } from '../src/testing/historical-fixtures';
 import type { FlipRow, GggImportJob } from '../src/core/api-types';
 import { localDate, localInput } from '../src/core/historical';
 
-async function service(page: Page, options: { failImport?: boolean; failMarkets?: boolean; completeImport?: boolean; many?: boolean; confidenceRows?: boolean } = {}) {
+async function service(page: Page, options: { failImport?: boolean; failMarkets?: boolean; completeImport?: boolean; many?: boolean; confidenceRows?: boolean; presenceRows?: boolean } = {}) {
   let job: GggImportJob | null = null;
   let polls = 0;
   const calls: { path: string; query: URLSearchParams; body: unknown }[] = [];
+  const availability = (league: string, rows: FlipRow[]) => {
+    const response = currentAvailability(league, rows);
+    if (options.presenceRows) {
+      for (const item of response.items) item.status = Number(item.id.slice(4)) % 2 ? 'not_observed' : 'observed';
+    }
+    return response;
+  };
   await page.route('**/api/v1/**', async (route) => {
     const request = route.request(), url = new URL(request.url()), path = url.pathname;
     calls.push({ path, query: url.searchParams, body: request.postData() ? request.postDataJSON() : undefined });
     const start = Number(url.searchParams.get('start')), end = Number(url.searchParams.get('end'));
     if (path === '/api/v1/leagues') return route.fulfill({ json: [{ id: 'Standard', name: 'Standard' }, { id: 'Other', name: 'Other league' }] });
     if (path === '/api/v1/status') return route.fulfill({ json: status() });
+    if (path === '/api/v1/analysis/league-start') return route.fulfill({ json: {
+      league: url.searchParams.get('league'), start: analysisPeriod(url.searchParams.get('league')!).start, approximate: true,
+    } });
     if (path === '/api/v1/selection') return route.fulfill({ json: { id: request.postDataJSON().id, name: 'Other league' } });
     if (path === '/api/v1/economy/leagues') return route.fulfill({ json: [
       { id: 'Ancestors', name: 'Ancestors', live: false, archived: true },
@@ -40,6 +50,11 @@ async function service(page: Page, options: { failImport?: boolean; failMarkets?
       job = gggJob('cancelled'); return route.fulfill({ json: job });
     }
     if (path === '/api/v1/analysis/period') return route.fulfill({ json: analysisPeriod(url.searchParams.get('league')!) });
+    if (path === '/api/v1/analysis/current-availability') {
+      const body = request.postDataJSON();
+      expect(body.rows.length).toBeLessThanOrEqual(100);
+      return route.fulfill({ json: availability(body.league, body.rows) });
+    }
     if (path === '/api/v1/analysis/sparklines') {
       const body = request.postDataJSON();
       expect(body.rows.length).toBeLessThanOrEqual(100);
@@ -61,6 +76,8 @@ async function service(page: Page, options: { failImport?: boolean; failMarkets?
       const confidenceRank = (label?: string | null) => label ? confidenceRanks[label] ?? 0 : 0;
       const rows = result.rows.filter((row) => row.name.toLowerCase().includes(search)
         && (!category || row.category === category) && (!venue || row.venue === venue)
+        && (!url.searchParams.get('presence')
+          || availability(url.searchParams.get('current_league')!, [row]).items[0]!.status === url.searchParams.get('presence'))
         && (!minimumConfidence || row.source === 'GGG Exchange'
           || [row.start_confidence, row.end_confidence].some(label => confidenceRank(label) >= confidenceRank(minimumConfidence))))
         .sort((a, b) => direction * (Number(a[field]) - Number(b[field])) || a.name.localeCompare(b.name));
@@ -77,6 +94,259 @@ async function service(page: Page, options: { failImport?: boolean; failMarkets?
   });
   return calls;
 }
+
+test('period band projects current league age into an archive and keeps the marker aligned through zoom', async ({ page }) => {
+  const now = Date.parse('2026-11-14T18:00:00Z');
+  await page.clock.install({ time: now });
+  const calls = await service(page);
+  const bounds = analysisPeriod('Mirage');
+  const age = (2 * 24 + 5) * 3600;
+  await page.route('**/api/v1/analysis/league-start?**', route => {
+    const league = new URL(route.request().url()).searchParams.get('league')!;
+    return route.fulfill({ json: { league, start: league === 'Standard' ? now / 1000 - age : bounds.start, approximate: league !== 'Standard' } });
+  });
+  await page.goto('/#/flips');
+  await page.getByLabel('League', { exact: true }).selectOption('archive:Mirage');
+  const marker = page.locator('.period-reference');
+  await expect(marker).toHaveCount(1);
+  expect(await marker.evaluate(element => getComputedStyle(element).stroke)).toBe('rgb(239, 137, 200)');
+  await expect(page.locator('.period-reference-caption')).toHaveCount(0);
+  await expect(marker.locator('title')).toHaveText(/Standard: 2d 5h 0m → .+ \(approx\.\)/);
+  expect(await marker.evaluate(element => getComputedStyle(element).pointerEvents)).toBe('stroke');
+  const x = age / (bounds.end! - bounds.start!) * 1000;
+  await expect.poll(async () => Number(await marker.getAttribute('x1'))).toBeCloseTo(x, 1);
+  const start = await page.getByLabel('Flip start', { exact: true }).inputValue();
+  const end = await page.getByLabel('Flip end', { exact: true }).inputValue();
+  const rankings = calls.filter(call => call.path.endsWith('/analysis/flips')).length;
+  const box = (await page.locator('period-band svg').boundingBox())!;
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await page.mouse.wheel(0, -300);
+  await expect.poll(async () => Math.abs(Number(await marker.getAttribute('x1')) - x)).toBeGreaterThan(1);
+  await page.getByRole('button', { name: 'Reset zoom', exact: true }).click();
+  await expect.poll(async () => Number(await marker.getAttribute('x1'))).toBeCloseTo(x, 1);
+  await page.clock.runFor(60_000);
+  await expect(marker.locator('title')).toContainText('2d 5h 1m');
+  await expect(page.getByLabel('Flip start', { exact: true })).toHaveValue(start);
+  await expect(page.getByLabel('Flip end', { exact: true })).toHaveValue(end);
+  expect(calls.filter(call => call.path.endsWith('/analysis/flips'))).toHaveLength(rankings);
+});
+
+test('period reference hides out-of-range projections and shows metadata errors without hiding results', async ({ page }) => {
+  const now = Date.parse('2026-11-14T18:00:00Z');
+  await page.clock.install({ time: now });
+  await service(page);
+  await page.route('**/api/v1/analysis/league-start?**', route => {
+    const league = new URL(route.request().url()).searchParams.get('league')!;
+    return route.fulfill({ json: { league, start: league === 'Standard' ? now / 1000 - 10 * 86400 : analysisPeriod('Mirage').start, approximate: false } });
+  });
+  await page.goto('/#/flips');
+  await page.getByLabel('League', { exact: true }).selectOption('archive:Mirage');
+  await expect(page.locator('.period-reference-caption')).toHaveCount(0);
+  await expect(page.locator('.period-reference')).toHaveCount(0);
+  await page.route('**/api/v1/analysis/league-start?**', route => route.fulfill({ status: 503, body: 'Launch metadata unavailable' }));
+  await page.getByRole('button', { name: 'Analyze flips', exact: true }).click();
+  await expect(page.getByRole('status').filter({ hasText: 'Current league equivalent unavailable' })).toContainText('503');
+  await expect(page.getByRole('table', { name: 'Ranked flips', exact: true })).toBeVisible();
+});
+
+test.describe('published UTC launch display', () => {
+  test.use({ timezoneId: 'America/New_York' });
+  test('converts a UTC launch to local time without shifting the marker instant', async ({ page }) => {
+    const now = Date.parse('2026-11-14T18:00:00Z');
+    await page.clock.install({ time: now });
+    await service(page);
+    const launch = Date.parse('2026-07-24T18:00:00Z') / 1000;
+    await page.route('**/api/v1/analysis/period?**', route => {
+      const league = new URL(route.request().url()).searchParams.get('league')!;
+      return route.fulfill({ json: { ...analysisPeriod(league), start: launch, end: launch + 4 * 86400,
+        hours: [launch + 4 * 3600, launch + 4 * 86400], days: [], bounds_source: 'official' } });
+    });
+    await page.route('**/api/v1/analysis/league-start?**', route => {
+      const league = new URL(route.request().url()).searchParams.get('league')!;
+      return route.fulfill({ json: { league, start: league === 'Standard' ? now / 1000 - 3600 : launch, approximate: false } });
+    });
+    await page.goto('/#/flips');
+    await page.getByLabel('League', { exact: true }).selectOption('archive:Mirage');
+    await expect(page.getByLabel('Period start', { exact: true })).toHaveAttribute('aria-valuemin', String(launch));
+    await expect(page.locator('.period-caption small')).toContainText('2026-07-24, 14:00 EDT');
+    await expect(page.locator('.period-reference title')).toContainText('2026-07-24, 15:00 EDT');
+    await expect.poll(async () => Number(await page.locator('.period-reference').getAttribute('x1'))).toBeCloseTo(1000 / 96, 1);
+  });
+});
+
+test('Flip period edits survive a full page reload and settings errors are visible', async ({ page }) => {
+  const calls = await service(page);
+  await page.goto('/#/flips');
+  const start = localInput(analysisPeriod().start! + 3600).replace('T', ' ');
+  const end = localInput(analysisPeriod().end! - 3600).replace('T', ' ');
+  await expect(page.getByRole('table', { name: 'Ranked flips' })).toBeVisible();
+  await page.getByLabel('Flip start', { exact: true }).fill(start);
+  await page.getByLabel('Flip end', { exact: true }).fill(end);
+  await page.getByLabel('Flip end', { exact: true }).blur();
+  await expect.poll(() => page.evaluate(() => JSON.parse(localStorage.getItem('faust.flip-periods') ?? '{}').Standard))
+    .toMatchObject({ start: analysisPeriod().start! + 3600, end: analysisPeriod().end! - 3600 });
+  await page.reload();
+  await expect(page.getByLabel('Flip start', { exact: true })).toHaveValue(start);
+  await expect(page.getByLabel('Flip end', { exact: true })).toHaveValue(end);
+  await page.evaluate(() => localStorage.setItem('faust.flip-periods', 'broken JSON'));
+  await page.getByRole('button', { name: 'Analyze flips', exact: true }).click();
+  await expect(page.getByRole('alert')).toContainText('Unable to save Flip analysis settings');
+  await expect(page.getByRole('table', { name: 'Ranked flips' })).toBeVisible();
+  await page.reload();
+  await expect(page.getByRole('alert')).toContainText('Unable to restore Flip analysis period');
+  expect(calls.some(c => c.path.includes('/settings/'))).toBe(false);
+});
+
+test('flip zoom and every filter survive reload, navigation and reset independently of selected dates', async ({ page }) => {
+  const calls = await service(page);
+  await page.goto('/#/flips');
+  await expect(page.getByRole('table', { name: 'Ranked flips' })).toBeVisible();
+  const start = await page.getByLabel('Flip start', { exact: true }).inputValue();
+  const end = await page.getByLabel('Flip end', { exact: true }).inputValue();
+  await page.getByLabel('Minimum starting price (Chaos)', { exact: true }).fill('2');
+  await page.getByLabel('Maximum starting price (Chaos)', { exact: true }).fill('500');
+  await page.getByLabel('Minimum exchange item volume', { exact: true }).fill('20');
+  await page.getByLabel('Minimum poe.ninja confidence', { exact: true }).selectOption('Medium');
+  await page.getByRole('checkbox', { name: 'Strict start date', exact: true }).check();
+  await page.getByLabel('Search flips', { exact: true }).fill('Golden');
+  await expect(page.getByRole('table', { name: 'Ranked flips' })).toContainText('Golden Oil');
+  await page.getByLabel('Flip category', { exact: true }).selectOption('Oils');
+  await page.getByLabel('Flip venue', { exact: true }).selectOption('trade');
+  await page.getByLabel('Flip sort', { exact: true }).selectOption('value-asc');
+  await page.getByLabel('Current-league presence', { exact: true }).selectOption('observed');
+  const caption = page.locator('.period-caption small');
+  const fullRange = await caption.innerText();
+  const box = (await page.locator('period-band svg').boundingBox())!;
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await page.mouse.wheel(0, -350);
+  await expect(caption).not.toHaveText(fullRange);
+  const zoomed = await caption.innerText();
+  await expect.poll(() => page.evaluate(() => JSON.parse(localStorage.getItem('faust.flip-periods') ?? '{}').Standard))
+    .toMatchObject({
+      filters: { minPrice: '2', maxPrice: '500', minVolume: '20', minConfidence: 'Medium', strictStart: true,
+        search: 'Golden', category: 'Oils', venue: 'trade', sort: 'value-asc', presence: 'observed' },
+      viewport: { start: expect.any(Number), end: expect.any(Number) },
+    });
+  await page.reload();
+  await expect(caption).toHaveText(zoomed);
+  await expect(page.getByLabel('Flip start', { exact: true })).toHaveValue(start);
+  await expect(page.getByLabel('Flip end', { exact: true })).toHaveValue(end);
+  await expect(page.getByLabel('Minimum starting price (Chaos)', { exact: true })).toHaveValue('2');
+  await expect(page.getByLabel('Maximum starting price (Chaos)', { exact: true })).toHaveValue('500');
+  await expect(page.getByLabel('Minimum exchange item volume', { exact: true })).toHaveValue('20');
+  await expect(page.getByLabel('Minimum poe.ninja confidence', { exact: true })).toHaveValue('Medium');
+  await expect(page.getByRole('checkbox', { name: 'Strict start date', exact: true })).toBeChecked();
+  await expect(page.getByLabel('Search flips', { exact: true })).toHaveValue('Golden');
+  await expect(page.getByLabel('Flip category', { exact: true })).toHaveValue('Oils');
+  await expect(page.getByLabel('Flip venue', { exact: true })).toHaveValue('trade');
+  await expect(page.getByLabel('Flip sort', { exact: true })).toHaveValue('value-asc');
+  await expect(page.getByLabel('Current-league presence', { exact: true })).toHaveValue('observed');
+  expect(calls.filter(c => c.path.endsWith('/analysis/flips')).at(-1)?.query.get('presence')).toBe('observed');
+  await page.getByRole('button', { name: 'Currency Exchange', exact: true }).click();
+  await page.getByRole('button', { name: 'Flip analysis', exact: true }).click();
+  await expect(caption).toHaveText(zoomed);
+  await page.getByRole('button', { name: 'Reset zoom', exact: true }).click();
+  await expect(caption).toHaveText(fullRange);
+  await expect.poll(() => page.evaluate(() => JSON.parse(localStorage.getItem('faust.flip-periods') ?? '{}').Standard.viewport)).toBeNull();
+  await page.reload();
+  await expect(caption).toHaveText(fullRange);
+});
+
+test('current-league presence filters all results before paging and resets the page offset', async ({ page }) => {
+  const calls = await service(page, { many: true, presenceRows: true });
+  await page.goto('/#/flips');
+  const rows = page.getByRole('table', { name: 'Ranked flips', exact: true }).locator('tbody > tr');
+  await expect(rows).toHaveCount(100);
+  await page.getByLabel('Current-league presence', { exact: true }).selectOption('observed');
+  await expect(page.getByText('Showing 1–100 of 103 matching items.', { exact: true })).toBeVisible();
+  await page.getByRole('button', { name: 'Next 100 flips', exact: true }).click();
+  await expect(rows).toHaveCount(3);
+  await expect(page.getByText('Showing 101–103 of 103 matching items.', { exact: true })).toBeVisible();
+  await page.getByLabel('Current-league presence', { exact: true }).selectOption('not_observed');
+  await expect(page.getByText('Showing 1–100 of 102 matching items.', { exact: true })).toBeVisible();
+  const query = calls.filter(c => c.path.endsWith('/analysis/flips')).at(-1)!.query;
+  expect(query.get('offset')).toBe('0'); expect(query.get('current_league')).toBe('Standard');
+  await page.getByLabel('Current-league presence', { exact: true }).selectOption('unknown');
+  await expect(page.getByText('Showing 0–0 of 0 matching items.', { exact: true })).toBeVisible();
+  await expect(rows).toContainText('No valid matching ranked items.');
+  await expect(page.getByLabel('Current-league presence', { exact: true })).toBeVisible();
+  await page.getByLabel('Current-league presence', { exact: true }).selectOption('');
+  await expect(rows).toHaveCount(100);
+});
+
+test('flip availability uses retained live league, reports saved counts honestly and keeps ranking on failure', async ({ page }) => {
+  const calls = await service(page);
+  await page.goto('/#/flips');
+  const table = page.getByRole('table', { name: 'Ranked flips', exact: true });
+  const cells = table.locator('.flip-current-availability');
+  await expect(cells).toHaveCount(2);
+  await expect(table.getByRole('columnheader', { name: 'Current league Standard' })).toBeVisible();
+  await expect(table.getByRole('columnheader').nth(0)).toHaveText('Item / source');
+  await expect(table.getByRole('columnheader').nth(1)).toHaveText('Current league Standard');
+  await expect(table.getByRole('columnheader').nth(2)).toHaveText('Chaos (start → end)');
+  await expect(table.locator('tbody > tr').first().locator('td').nth(1)).toHaveClass('flip-current-availability');
+  await expect(cells.first()).toContainText('42 listings');
+  await expect(cells.last()).toContainText('? listings');
+  await expect(cells.first().locator('.current-league-summary > span')).toHaveText('125,5c');
+  await expect(cells.first().locator('.current-league-summary > small')).toHaveText(/42 listings \d+[mhd] ago/);
+  expect(await cells.first().locator('.current-league-summary > small').evaluate(element => getComputedStyle(element).display)).toBe('block');
+  await expect(cells.first()).not.toContainText('Observed');
+  expect(await cells.first().locator('.current-league-summary').evaluate(element => getComputedStyle(element).whiteSpace)).toBe('nowrap');
+  await expect(cells.first()).toContainText(/ago/);
+  await expect(cells.first().getByRole('img', { name: 'Current league recent poe.ninja trend for Golden Oil' })).toBeVisible();
+  const textBox = (await cells.first().locator('.current-league-summary').boundingBox())!;
+  const chartBox = (await cells.first().locator('.current-league-sparkline').boundingBox())!;
+  expect(chartBox.x).toBeGreaterThanOrEqual(textBox.x + textBox.width);
+  expect(Math.abs(chartBox.y + chartBox.height / 2 - textBox.y - textBox.height / 2)).toBeLessThan(2);
+  for (const width of [1440, 390]) {
+    await page.setViewportSize({ width, height: 900 });
+    for (const cell of await cells.all()) {
+      const graph = (await cell.locator('.current-league-sparkline').boundingBox())!;
+      const bounds = (await cell.boundingBox())!;
+      const historicalPrice = (await cell.locator('xpath=following-sibling::td[1]').boundingBox())!;
+      expect(graph.x + graph.width).toBeLessThanOrEqual(bounds.x + bounds.width - 6);
+      expect(historicalPrice.x - graph.x - graph.width).toBeGreaterThanOrEqual(6);
+    }
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  }
+  await expect(cells.first().locator('.current-league-sparkline path')).toHaveCount(2);
+  expect(await cells.first().locator('.current-league-sparkline path').evaluateAll(paths =>
+    paths.every(path => (path as SVGPathElement).getTotalLength() > 0))).toBe(true);
+  await page.getByLabel('League', { exact: true }).selectOption('archive:Mirage');
+  await expect.poll(() => calls.filter(c => c.path.endsWith('/analysis/flips')).at(-1)?.query.get('league')).toBe('Mirage');
+  await expect.poll(() => calls.filter(c => c.path.endsWith('/current-availability')).at(-1)?.body)
+    .toMatchObject({ league: 'Standard' });
+  await expect(cells.first()).toContainText('125,5c');
+  await page.route('**/api/v1/analysis/current-availability', route => route.fulfill({ status: 503, body: 'Saved snapshots unavailable' }));
+  await page.getByRole('button', { name: 'Analyze flips', exact: true }).click();
+  await expect(page.getByRole('alert')).toContainText('Current-league availability unavailable');
+  await expect(table).toContainText('Golden Oil');
+  await expect(cells.first()).toContainText('Check failed');
+});
+
+test('flip availability distinguishes no observation, missing data, ambiguous variants and zero listings', async ({ page }) => {
+  await service(page);
+  let observed = false;
+  await page.route('**/api/v1/analysis/current-availability', route => {
+    const body = route.request().postDataJSON();
+    const response = currentAvailability(body.league, body.rows);
+    response.items[0] = { ...response.items[0]!, status: observed ? 'observed' : 'not_observed', listings: observed ? 0 : null,
+      detail: 'Not observed does not mean unobtainable.' };
+    response.items[1] = { ...response.items[1]!, status: observed ? 'ambiguous' : 'unknown', price: null, listings: null };
+    return route.fulfill({ json: response });
+  });
+  await page.goto('/#/flips');
+  const cells = page.locator('.flip-current-availability');
+  await expect(cells.first()).toContainText('Not observed');
+  await expect(cells.first()).toHaveAttribute('title', 'Not observed does not mean unobtainable.');
+  await expect(cells.last()).toContainText('Unknown');
+  await expect(cells.first()).not.toContainText('125,5c');
+  observed = true;
+  await page.getByRole('button', { name: 'Analyze flips', exact: true }).click();
+  await expect(cells.first()).toContainText('0 listings');
+  await expect(cells.last()).toContainText('Ambiguous variant');
+  await expect(cells.last().locator('.current-league-sparkline')).toHaveCount(0);
+});
 
 test('exchange direct link, saved pair history, import progress/cancel, route persistence and back/reload', async ({ page }) => {
   const calls = await service(page);
@@ -156,8 +426,12 @@ test('flips exact filters, min/max validation, numeric sorts, alternatives, excl
   await page.goto('/#/flips');
   const table = page.getByRole('table', { name: 'Ranked flips', exact: true });
   await expect(table.locator('tbody > tr').first()).toContainText('Golden Oil');
-  await expect(table.getByRole('columnheader', { name: 'Item volume (start → end)', exact: true })).toBeVisible();
-  await expect(table.locator('tbody > tr').first().locator('td').nth(5)).toHaveText('Unknown');
+  await expect(table.getByRole('columnheader', { name: 'Volume / confidence', exact: true })).toBeVisible();
+  await expect(table.getByRole('columnheader')).toHaveCount(7);
+  await expect(table.locator('tbody > tr').first().locator('td').nth(2).locator('small')).toHaveCount(0);
+  const ninjaQuality = table.locator('tbody > tr').first().locator('td').nth(5);
+  await expect(ninjaQuality).toHaveText('High → Low');
+  await expect(ninjaQuality).toHaveAttribute('title', /poe.ninja provider confidence/);
   await expect(table.locator('tbody > tr').filter({ has: page.getByRole('button', { name: 'Divine Orb', exact: true }) }).locator('td').nth(5)).toHaveText('50 → 60');
   await page.getByLabel('Minimum starting price (Chaos)', { exact: true }).fill('100');
   await page.getByLabel('Maximum starting price (Chaos)', { exact: true }).fill('10');
@@ -194,6 +468,10 @@ test('flips exact filters, min/max validation, numeric sorts, alternatives, excl
   await page.getByRole('button', { name: 'Triangular arbitrage', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Triangular arbitrage', exact: true })).toBeVisible();
   await page.goBack();
+  await expect(page.getByLabel('Flip sort')).toHaveValue('percent-desc');
+  await expect(page.getByLabel('Minimum starting price (Chaos)', { exact: true })).toHaveValue('');
+  await expect(page.getByLabel('Flip category')).toHaveValue('');
+  await page.getByRole('combobox', { name: 'League', exact: true }).selectOption('Standard');
   await expect(page.getByLabel('Flip sort')).toHaveValue('value-desc');
   await expect(page.getByLabel('Minimum starting price (Chaos)', { exact: true })).toHaveValue('100');
   await expect(page.getByLabel('Flip category')).toHaveValue('Oils');
@@ -322,7 +600,7 @@ test('flip rows display later actual starts without changing the selected period
     row.start_observed_at = new Date((start + 3600) * 1000).toISOString();
     row.alternatives[0]!.start_observed_at = row.start_observed_at;
     row.alternatives[0]!.end_observed_at = row.end_observed_at;
-    result.rows[1]!.start_observed_at = '2026-11-10';
+    result.rows[1]!.start_observed_at = '2026-11-11';
     await route.fulfill({ json: result });
   });
   await page.goto('/#/flips');
@@ -331,9 +609,9 @@ test('flip rows display later actual starts without changing the selected period
   const selectedStart = await page.getByLabel('Flip start', { exact: true }).inputValue();
   const selectedEnd = await page.getByLabel('Flip end', { exact: true }).inputValue();
   const row = table.locator('tbody > tr').filter({ has: page.getByRole('button', { name: 'Divine Orb', exact: true }) });
-  await expect(row.locator('td').nth(1)).toContainText(actualStart);
+  await expect(row.locator('td').nth(2)).toContainText(actualStart);
   expect(actualStart).not.toBe(selectedStart);
-  await expect(table).toContainText('2026-11-10 (UTC day)');
+  await expect(table).toContainText('2026-11-11 (UTC day)');
   await page.getByRole('button', { name: 'Divine Orb', exact: true }).click();
   await expect(page.getByRole('table', { name: 'Divine Orb pair alternatives' })).toContainText(actualStart);
   await expect(page.getByLabel('Flip start', { exact: true })).toHaveValue(selectedStart);
@@ -410,9 +688,9 @@ test('long flip names wrap on desktop and mobile while numeric columns stay sing
     expect(layout.overflow).toBe(false);
     expect(layout.whiteSpace).toBe('normal');
     const cells = button.locator('xpath=ancestor::tr').locator('td');
-    await expect(cells).toHaveCount(8);
-    const numericCells = button.locator('xpath=ancestor::tr').locator('td:nth-child(n+2):nth-child(-n+6)');
-    await expect(numericCells).toHaveCount(5);
+    await expect(cells).toHaveCount(7);
+    const numericCells = button.locator('xpath=ancestor::tr').locator('td:nth-child(n+3):nth-child(-n+6)');
+    await expect(numericCells).toHaveCount(4);
     expect(await numericCells.evaluateAll((cells) => cells.every((cell) => getComputedStyle(cell).whiteSpace === 'nowrap'))).toBe(true);
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   }
@@ -433,7 +711,7 @@ test('flip ranking renders before asynchronous charts, with provider confidence,
   const table = page.getByRole('table', { name: 'Ranked flips', exact: true });
   await expect(table).toContainText('Divine Orb');
   await expect(table).toContainText('High → Low');
-  await expect(table.locator('tbody > tr').filter({ hasText: 'Divine Orb' }).locator('td').nth(6)).toHaveText('—');
+  await expect(table.locator('tbody > tr').filter({ hasText: 'Divine Orb' }).locator('td').nth(5)).toHaveText('50 → 60');
   await expect(page.getByRole('button', { name: 'Analyze flips', exact: true })).toBeEnabled();
   await expect(page.getByRole('status').filter({ hasText: 'Loading historical charts' })).toBeVisible();
   await expect(table.locator('.flip-sparkline')).toHaveCount(0);
@@ -442,7 +720,7 @@ test('flip ranking renders before asynchronous charts, with provider confidence,
   await expect(table.locator('.flip-sparkline path')).toHaveCount(4);
   expect(await table.locator('.flip-sparkline path').evaluateAll((paths) =>
     paths.every((path) => path.getAttribute('d')?.startsWith('M') && (path as SVGPathElement).getTotalLength() > 0))).toBe(true);
-  await expect(table.getByRole('img').first()).toHaveAccessibleName(/Historical Chaos prices: 4 observations/);
+  await expect(table.locator('.flip-sparkline').first()).toHaveAccessibleName(/Historical Chaos prices: 4 observations/);
   await expect(table.locator('.flip-chart-cell').first()).toHaveAttribute('title', /Unsampled fluctuations and gaps are not represented/);
   expect(await table.innerText()).not.toContain('Unsampled fluctuations and gaps are not represented.');
   await page.getByRole('button', { name: 'Flip analysis information', exact: true }).click();
@@ -451,10 +729,15 @@ test('flip ranking renders before asynchronous charts, with provider confidence,
   expect(calls.filter((call) => call.path.endsWith('/analysis/flips'))).toHaveLength(1);
   for (const width of [1440, 390]) {
     await page.setViewportSize({ width, height: 900 });
-    await expect(table.locator('th')).toHaveCount(8);
+    await expect(table.locator('th')).toHaveCount(7);
     expect(await table.locator('.flip-sparkline').first().evaluate((element) => element.getBoundingClientRect().width)).toBe(120);
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   }
+  await page.setViewportSize({ width: 1920, height: 900 });
+  const tableBox = (await table.boundingBox())!;
+  const containerBox = (await table.locator('..').boundingBox())!;
+  expect(tableBox.width).toBeLessThan(containerBox.width - 100);
+  expect(await table.locator('th').first().evaluate(element => getComputedStyle(element).paddingLeft)).toBe('6px');
 });
 
 test('two-day flip sparklines draw price paths and position isolated observations', async ({ page }) => {
@@ -533,9 +816,13 @@ test('search and league switches cancel late chart batches and only render the c
   await page.getByRole('combobox', { name: 'League', exact: true }).selectOption('Other');
   await expect.poll(() => batches.length).toBe(3);
   expect(batches[2]!.league).toBe('Other league');
+  expect(batches[2]!.rows).toHaveLength(2);
+  await expect(page.getByLabel('Search flips')).toHaveValue('');
   releases[1]!(); releases[2]!();
-  await expect(table.locator('.flip-sparkline')).toHaveCount(1);
-  await expect(table.locator('.flip-chart-cell')).toHaveAttribute('title', 'Chart batch 2');
+  await expect(table.locator('.flip-sparkline')).toHaveCount(2);
+  for (const cell of await table.locator('.flip-chart-cell').all()) {
+    await expect(cell).toHaveAttribute('title', 'Chart batch 2');
+  }
 });
 
 test('flip period bounds follow league data, preserve custom navigation and support zoom, drag and keyboard commits', async ({ page }) => {
@@ -621,8 +908,7 @@ test('flip prices, growth, percentages and native alternatives use compact share
   await page.route('**/api/v1/analysis/flips?*', (route) => route.fulfill({ json: result }));
   await page.goto('/#/flips');
   const cells = page.getByRole('table', { name: 'Ranked flips', exact: true }).locator('tbody > tr').first().locator('td');
-  await expect(cells.nth(1).locator('span')).toHaveText('94,23');
-  await expect(cells.nth(2)).toHaveText('12 345,68');
+  await expect(cells.nth(2).locator('span')).toHaveText('94,23 → 12 345,68');
   await expect(cells.nth(3)).toHaveText('12 251,45');
   await expect(cells.nth(4)).toHaveText('8 932,26%');
   await expect(cells.nth(4)).toHaveAttribute('title', row.growth_percent);

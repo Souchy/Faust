@@ -1,7 +1,7 @@
 import { resolve } from 'aurelia';
-import type { AnalysisPeriod, EconomyHistory, FlipAnalysis as FlipAnalysisResult, FlipRow, GggHistory } from '../../core/api-types';
+import type { AnalysisPeriod, CurrentItemAvailability, EconomyHistory, FlipAnalysis as FlipAnalysisResult, FlipFilters, FlipPeriodSelection, FlipRow, FlipViewport, GggHistory, LeagueStart } from '../../core/api-types';
 import { MarketApi } from '../../core/market-api';
-import { formatNumber } from '../../core/economy';
+import { formatNumber, sparkSegments } from '../../core/economy';
 import { flipSparkline, type FlipSparklineView } from '../../core/flip-sparkline';
 import { decimal, latestHour, localInput, localDate, nativeRatioLabel, priceSegments } from '../../core/historical';
 import { observationPoints } from '../../components/period-band/period-band';
@@ -14,7 +14,56 @@ export class FlipAnalysis {
   private detailRequest: AbortController | null = null;
   private periodRequest: AbortController | null = null;
   private chartRequest: AbortController | null = null;
+  private availabilityRequest: AbortController | null = null;
+  private referenceRequest: AbortController | null = null;
+  private referenceTimer: ReturnType<typeof setInterval> | null = null;
+  private currentLaunch: LeagueStart | null = null;
+  private selectedLaunch: LeagueStart | null = null;
+  referenceTime: number | null = null;
+  referenceLabel = '';
+  referenceError = '';
+  private updateReference(): void {
+    const current = this.currentLaunch, selected = this.selectedLaunch;
+    this.referenceTime = null; this.referenceLabel = '';
+    if (current?.start == null || selected?.start == null) return;
+    const age = Date.now() / 1000 - current.start;
+    if (age < 0) { this.referenceLabel = 'Current league has not started yet.'; return; }
+    this.referenceTime = selected.start + age;
+    const days = Math.floor(age / 86400), hours = Math.floor(age % 86400 / 3600);
+    const minutes = Math.floor(age % 3600 / 60);
+    const approximate = current.approximate || selected.approximate;
+    this.referenceLabel = `${this.currentLeagueName}: ${days}d ${hours}h ${minutes}m → ${localDate(this.referenceTime)}${approximate ? ' (approx.)' : ''}`;
+    if (this.referenceTime < this.minimum || this.referenceTime > this.maximum) {
+      this.referenceLabel += ' (outside available period)';
+    }
+  }
+  private async loadReference(): Promise<void> {
+    this.referenceRequest?.abort();
+    if (this.referenceTimer) clearInterval(this.referenceTimer);
+    this.referenceTimer = null;
+    this.currentLaunch = null; this.selectedLaunch = null;
+    this.referenceTime = null; this.referenceLabel = ''; this.referenceError = '';
+    const current = this.currentLeagueName, selected = this.session.selectedLeagueName;
+    if (!current) { this.referenceError = 'Current league equivalent unavailable: select a live league.'; return; }
+    const request = this.referenceRequest = new AbortController();
+    try {
+      const currentPromise = this.api.leagueStart(current, request.signal);
+      const [currentLaunch, selectedLaunch] = await Promise.all([
+        currentPromise, current === selected ? currentPromise : this.api.leagueStart(selected, request.signal),
+      ]);
+      if (request.signal.aborted || current !== this.currentLeagueName || selected !== this.session.selectedLeagueName) return;
+      if (currentLaunch.league !== current || selectedLaunch.league !== selected) throw new Error('Launch metadata belongs to a different league.');
+      if (currentLaunch.start == null || selectedLaunch.start == null) throw new Error('No official launch or saved dataset start is available.');
+      this.currentLaunch = currentLaunch; this.selectedLaunch = selectedLaunch;
+      this.updateReference();
+      this.referenceTimer = setInterval(() => this.updateReference(), 60_000);
+    } catch (error) {
+      if (!request.signal.aborted) this.referenceError = `Current league equivalent unavailable: ${error instanceof Error ? error.message : String(error)}`;
+    }
+  }
   private searchTimer: ReturnType<typeof setTimeout> | null = null;
+  private settingsTimer: ReturnType<typeof setTimeout> | null = null;
+  private pendingSettings: { league: string; settings: FlipPeriodSelection } | null = null;
   private active = false;
   private loadedLeague = '';
   start = '';
@@ -31,6 +80,8 @@ export class FlipAnalysis {
   minVolume = '';
   minConfidence = '';
   strictStart = false;
+  presence = '';
+  viewport: FlipViewport | null = null;
   search = '';
   category = '';
   venue = '';
@@ -46,10 +97,25 @@ export class FlipAnalysis {
   historyLoading = false;
   result: FlipAnalysisResult | null = null;
   error = '';
+  settingsError = '';
   isLoading = false;
   charts: Record<string, FlipSparklineView> = {};
   chartsLoading = false;
   chartError = '';
+  currentAvailability: Record<string, CurrentItemAvailability> = {};
+  currentTrends: Record<string, { paths: string[]; dots: { x: number; y: number }[] }> = {};
+  currentAvailabilityLoading = false;
+  currentAvailabilityError = '';
+  get currentLeagueName(): string {
+    return this.session.leagues.find(league => league.id === this.session.selectedLeagueId)?.name ?? '';
+  }
+  availabilityAge(value: string): string {
+    const minutes = Math.max(0, Math.floor((Date.now() - new Date(value).getTime()) / 60_000));
+    if (!Number.isFinite(minutes)) return 'Update time unknown';
+    if (minutes < 60) return `${minutes}m ago`;
+    if (minutes < 1440) return `${Math.floor(minutes / 60)}h ago`;
+    return `${Math.floor(minutes / 1440)}d ago`;
+  }
   date = localDate;
   format = formatNumber;
   nativeRatioLabel = nativeRatioLabel;
@@ -69,6 +135,46 @@ export class FlipAnalysis {
   cancelSparklines(): void {
     this.chartRequest?.abort(); this.chartRequest = null;
     this.charts = {}; this.chartsLoading = false; this.chartError = '';
+    this.availabilityRequest?.abort(); this.availabilityRequest = null;
+    this.currentAvailability = {}; this.currentAvailabilityLoading = false; this.currentAvailabilityError = '';
+    this.currentTrends = {};
+  }
+  private async loadCurrentAvailability(result: FlipAnalysisResult): Promise<void> {
+    if (!result.rows.length) return;
+    const request = this.availabilityRequest = new AbortController();
+    const league = this.session.selectedLeagueId;
+    this.currentAvailabilityLoading = true;
+    try {
+      if (!league) throw new Error('Select a live league to check current availability.');
+      const response = await this.api.currentAvailability(league, result.rows, request.signal);
+      if (request.signal.aborted || this.result !== result || league !== this.session.selectedLeagueId) return;
+      if (response.league !== league) throw new Error('Availability response belongs to a different league.');
+      const items: Record<string, CurrentItemAvailability> = {};
+      const trends: typeof this.currentTrends = {};
+      for (const row of result.rows) {
+        const item = response.items.find(item => item.id === row.id);
+        if (!item) throw new Error(`Missing current availability for ${row.name}.`);
+        items[row.id] = item;
+        const segments = sparkSegments(item.sparkline, 120, 36);
+        trends[row.id] = {
+          paths: segments.filter(segment => segment.includes(' ')).map(segment => `M${segment.replaceAll(' ', ' L')}`),
+          dots: segments.filter(segment => !segment.includes(' ')).map(segment => {
+            const [x, y] = segment.split(',').map(Number);
+            return { x: x!, y: y! };
+          }),
+        };
+      }
+      this.currentAvailability = items;
+      this.currentTrends = trends;
+    } catch (error) {
+      if (!request.signal.aborted && this.result === result && league === this.session.selectedLeagueId) {
+        this.currentAvailabilityError = `Current-league availability unavailable: ${error instanceof Error ? error.message : String(error)}`;
+      }
+    } finally {
+      if (this.availabilityRequest === request) {
+        this.currentAvailabilityLoading = false; this.availabilityRequest = null;
+      }
+    }
   }
   private async loadSparklines(result: FlipAnalysisResult): Promise<void> {
     this.cancelSparklines();
@@ -136,6 +242,12 @@ export class FlipAnalysis {
     const date = new Date(value);
     return Number.isNaN(date.getTime()) ? value : localDate(date.getTime() / 1000);
   }
+  hasDifferentStart(row: FlipRow): boolean {
+    if (!this.result) return false;
+    return row.history_granularity === 'daily'
+      ? row.start_observed_at.slice(0, 10) !== new Date(this.result.start * 1000).toISOString().slice(0, 10)
+      : Date.parse(row.start_observed_at) / 1000 !== this.result.start;
+  }
   constructor() { if (this.session.flipState) Object.assign(this, this.session.flipState); }
   loading(): void { this.session.page = 'flips'; this.session.flips = this; }
   attached(): void { this.active = true; void this.initialize(); }
@@ -146,12 +258,16 @@ export class FlipAnalysis {
   snapshot() {
     return { start: this.start, end: this.end, minPrice: this.minPrice, maxPrice: this.maxPrice,
       minVolume: this.minVolume, minConfidence: this.minConfidence, strictStart: this.strictStart, search: this.search, category: this.category, venue: this.venue,
-      sort: this.sort, expanded: this.expanded, result: this.result, loadedLeague: this.loadedLeague,
+      sort: this.sort, presence: this.presence, viewport: this.viewport, expanded: this.expanded, result: this.result, loadedLeague: this.loadedLeague,
       offset: this.offset, period: this.period, periodLeague: this.periodLeague, selectedStart: this.selectedStart,
       selectedEnd: this.selectedEnd, excludedLimit: this.excludedLimit, historyRow: this.historyRow, history: this.history,
       ninjaHistory: this.ninjaHistory, historyLimit: this.historyLimit };
   }
   unbinding(): void {
+    this.referenceRequest?.abort();
+    if (this.referenceTimer) clearInterval(this.referenceTimer);
+    this.referenceTimer = null;
+    this.flushSettings();
     this.cancelSparklines();
     this.active = false; this.request?.abort(); this.detailRequest?.abort();
     this.periodRequest?.abort();
@@ -187,6 +303,7 @@ export class FlipAnalysis {
     } finally { if (this.detailRequest === request) this.historyLoading = false; }
   }
   async datasetChanged(force = true): Promise<void> {
+    const reference = this.loadReference();
     this.cancelSparklines();
     this.periodRequest?.abort(); this.request?.abort(); this.detailRequest?.abort();
     this.isLoading = false;
@@ -194,16 +311,35 @@ export class FlipAnalysis {
     const request = this.periodRequest = new AbortController();
     const league = this.session.selectedLeagueName;
     const changed = this.periodLeague !== league;
-    if (changed) { this.result = null; this.period = null; this.start = ''; this.end = ''; this.offset = 0; }
+    this.flushSettings();
+    if (changed) {
+      if (this.periodLeague) Object.assign(this, this.defaultFilters());
+      this.result = null; this.period = null; this.start = ''; this.end = ''; this.offset = 0;
+      this.viewport = null;
+    }
     this.periodLoading = true; this.error = '';
     try {
-      const period = await this.api.analysisPeriod(league, request.signal);
+      const restore = changed || !this.start || !this.end;
+      const [period, saved] = await Promise.all([
+        this.api.analysisPeriod(league, request.signal),
+        restore ? this.loadSavedPeriod(league, request.signal) : Promise.resolve(null),
+        reference,
+      ]);
       if (request.signal.aborted || league !== this.session.selectedLeagueName) return;
+      if (saved) {
+        this.setRange(saved.start, saved.end);
+        this.viewport = saved.viewport ?? null;
+        if (saved.filters) Object.assign(this, saved.filters);
+      }
+      if (this.selectedLaunch?.start != null && !this.selectedLaunch.approximate) {
+        period.start = this.selectedLaunch.start;
+      }
       this.period = period; this.periodLeague = league;
+      this.updateReference();
       if (this.canAnalyze) {
         const points = observationPoints(period.hours, period.days).filter((point) => point >= this.minimum && point <= this.maximum);
         const savedStart = new Date(this.start).getTime() / 1000, savedEnd = new Date(this.end).getTime() / 1000;
-        if (changed || !this.start || !this.end) {
+        if (!this.start || !this.end) {
           if (points.length >= 2) this.setRange(points[0]!, points.at(-1)!);
           else { this.start = ''; this.end = ''; }
           this.offset = 0; force = true;
@@ -213,19 +349,74 @@ export class FlipAnalysis {
         }
       }
       if (this.canAnalyze && this.start && this.end && (force || !this.result || this.loadedLeague !== league)) await this.refresh(false);
-      else if (this.result) void this.loadSparklines(this.result);
+      else if (this.result) {
+        void this.loadSparklines(this.result);
+        void this.loadCurrentAvailability(this.result);
+      }
     } catch (error) {
       if (!request.signal.aborted) { this.period = null; this.result = null; this.error = error instanceof Error ? error.message : String(error); }
     } finally { if (this.periodRequest === request) this.periodLoading = false; }
+  }
+  private async loadSavedPeriod(league: string, signal: AbortSignal): Promise<FlipPeriodSelection | null> {
+    this.settingsError = '';
+    try {
+      const saved = await this.session.loadFlipPeriod(league, signal);
+      if (saved && (!Number.isSafeInteger(saved.start) || !Number.isSafeInteger(saved.end)
+        || saved.start < 0 || saved.start >= saved.end || saved.start % 3600 !== 0 || saved.end % 3600 !== 0
+        || !Number.isFinite(new Date(saved.end * 1000).getTime()))) {
+        throw new Error('Saved period contains invalid hour timestamps.');
+      }
+      return saved;
+    } catch (error) {
+      if (!signal.aborted && league === this.session.selectedLeagueName) {
+        this.settingsError = `Unable to restore Flip analysis period: ${error instanceof Error ? error.message : String(error)}`;
+      }
+      return null;
+    }
   }
   private setRange(start: number, end: number): void {
     this.selectedStart = start; this.selectedEnd = end;
     this.start = localInput(start); this.end = localInput(end);
   }
+  private defaultFilters(): FlipFilters {
+    return { minPrice: '', maxPrice: '', minVolume: '', minConfidence: '', strictStart: false,
+      search: '', category: '', venue: '', sort: 'percent-desc', presence: '' };
+  }
+  private filterSettings(): FlipFilters {
+    return { minPrice: this.minPrice, maxPrice: this.maxPrice, minVolume: this.minVolume,
+      minConfidence: this.minConfidence, strictStart: this.strictStart, search: this.search,
+      category: this.category, venue: this.venue, sort: this.sort, presence: this.presence };
+  }
+  commitViewport(viewport: FlipViewport | null): void {
+    this.viewport = viewport;
+    this.queueSettingsSave();
+  }
+  queueSettingsSave(): void {
+    if (!this.canAnalyze) return;
+    if (this.settingsTimer) clearTimeout(this.settingsTimer);
+    try {
+      this.pendingSettings = { league: this.session.selectedLeagueName,
+        settings: { ...this.enteredRange(), viewport: this.viewport, filters: this.filterSettings() } };
+      this.settingsTimer = setTimeout(() => this.flushSettings(), 200);
+    } catch (error) {
+      this.pendingSettings = null;
+      this.settingsError = `Unable to save Flip analysis settings: ${error instanceof Error ? error.message : String(error)}`;
+    }
+  }
+  private flushSettings(): void {
+    if (this.settingsTimer) clearTimeout(this.settingsTimer);
+    this.settingsTimer = null;
+    const pending = this.pendingSettings; this.pendingSettings = null;
+    if (pending) void this.persistSettings(pending.league, pending.settings);
+  }
+  filterEdited(): void {
+    this.cancelSparklines(); this.queueSettingsSave();
+  }
   commitPeriod(range: { start: number; end: number }): void {
-    this.setRange(range.start, range.end); void this.refresh();
+    this.setRange(range.start, range.end); void this.savePeriod(); void this.refresh();
   }
   searchChangedByUser(): void {
+    this.queueSettingsSave();
     this.cancelSparklines();
     this.request?.abort();
     if (this.searchTimer) clearTimeout(this.searchTimer);
@@ -235,13 +426,56 @@ export class FlipAnalysis {
     this.offset = Math.max(0, this.offset + direction * 100); await this.refresh(false);
   }
   async analyze(): Promise<void> {
+    const league = this.session.selectedLeagueName;
     this.offset = 0;
     await this.datasetChanged();
+    if (league === this.session.selectedLeagueName) await this.savePeriod();
+  }
+  private enteredRange(): { start: number; end: number } {
+    // Retain absolute timestamps when a band selection falls in a repeated local DST hour.
+    const enteredStart = this.start === localInput(this.selectedStart) ? this.selectedStart : new Date(this.start).getTime() / 1000;
+    const enteredEnd = this.end === localInput(this.selectedEnd) ? this.selectedEnd : new Date(this.end).getTime() / 1000;
+    if (!Number.isFinite(enteredStart) || !Number.isFinite(enteredEnd)
+      || enteredStart % 3600 !== 0 || enteredEnd % 3600 !== 0
+      || localInput(enteredStart) !== this.start || localInput(enteredEnd) !== this.end) {
+      throw new Error('Enter a valid local date and time in yyyy-mm-dd hh:mm format.');
+    }
+    const start = Math.max(this.minimum, Math.min(this.maximum, enteredStart));
+    const end = Math.max(this.minimum, Math.min(this.maximum, enteredEnd));
+    if (start >= end) throw new Error('End must be after start.');
+    return { start, end };
+  }
+  async savePeriod(): Promise<void> {
+    if (!this.canAnalyze) return;
+    const league = this.session.selectedLeagueName;
+    try {
+      const range = this.enteredRange();
+      if (this.settingsTimer) clearTimeout(this.settingsTimer);
+      this.settingsTimer = null; this.pendingSettings = null;
+      await this.persistSettings(league, {
+        ...range, viewport: this.viewport, filters: this.filterSettings(),
+      });
+    } catch (error) {
+      if (league === this.session.selectedLeagueName) {
+        this.settingsError = `Unable to save Flip analysis period: ${error instanceof Error ? error.message : String(error)}`;
+      }
+    }
+  }
+  private async persistSettings(league: string, settings: FlipPeriodSelection): Promise<void> {
+    try {
+      await this.session.saveFlipPeriod(league, settings);
+      if (league === this.session.selectedLeagueName) this.settingsError = '';
+    } catch (error) {
+      if (league === this.session.selectedLeagueName) {
+        this.settingsError = `Unable to save Flip analysis settings: ${error instanceof Error ? error.message : String(error)}`;
+      }
+    }
   }
   async refresh(resetOffset = true): Promise<void> {
     this.cancelSparklines();
     if (this.searchTimer) { clearTimeout(this.searchTimer); this.searchTimer = null; }
     if (!this.period || this.periodLeague !== this.session.selectedLeagueName) { await this.datasetChanged(); return; }
+    if (!this.periodLoading) this.queueSettingsSave();
     if (resetOffset) this.offset = 0;
     this.request?.abort(); this.detailRequest?.abort();
     const request = this.request = new AbortController();
@@ -249,18 +483,8 @@ export class FlipAnalysis {
     this.excludedLimit = 100;
     try {
       if (!this.canAnalyze) throw new Error('Known league bounds are required before analysis.');
-      // Retain absolute timestamps when a band selection falls in a repeated local DST hour.
-      const enteredStart = this.start === localInput(this.selectedStart) ? this.selectedStart : new Date(this.start).getTime() / 1000;
-      const enteredEnd = this.end === localInput(this.selectedEnd) ? this.selectedEnd : new Date(this.end).getTime() / 1000;
-      if (!Number.isFinite(enteredStart) || !Number.isFinite(enteredEnd)
-        || enteredStart % 3600 !== 0 || enteredEnd % 3600 !== 0
-        || localInput(enteredStart) !== this.start || localInput(enteredEnd) !== this.end) {
-        throw new Error('Enter a valid local date and time in yyyy-mm-dd hh:mm format.');
-      }
-      const start = Math.max(this.minimum, Math.min(this.maximum, enteredStart));
-      const end = Math.max(this.minimum, Math.min(this.maximum, enteredEnd));
+      const { start, end } = this.enteredRange();
       this.setRange(start, end);
-      if (start >= end) throw new Error('End must be after start.');
       const min = decimal(this.minPrice, 'Minimum starting price'), max = decimal(this.maxPrice, 'Maximum starting price');
       const volume = decimal(this.minVolume, 'Minimum GGG item volume');
       if (min !== undefined && max !== undefined && Number(min) > Number(max)) throw new Error('Minimum starting price must not exceed maximum.');
@@ -271,11 +495,16 @@ export class FlipAnalysis {
       if (volume !== undefined) filters.min_volume = volume;
       if (this.minConfidence) filters.min_confidence = this.minConfidence;
       if (this.strictStart) filters.strict_start = 'true';
+      if (this.presence) {
+        if (!this.session.selectedLeagueId) throw new Error('Select a live league before filtering current presence.');
+        filters.presence = this.presence; filters.current_league = this.session.selectedLeagueId;
+      }
       const league = this.session.selectedLeagueName;
       const result = await this.api.flips(league, start, end, filters, request.signal);
       if (!request.signal.aborted && league === this.session.selectedLeagueName) {
         this.result = result; this.loadedLeague = league; this.offset = result.offset;
         void this.loadSparklines(result);
+        void this.loadCurrentAvailability(result);
       }
     } catch (error) {
       if (!request.signal.aborted) { this.result = null; this.error = error instanceof Error ? error.message : String(error); }

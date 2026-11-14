@@ -6,6 +6,8 @@
     <g class="period-markers"><line repeat.for="marker of markers; key: time" class.bind="marker.kind & attr"
       x1.bind="marker.x & attr" x2.bind="marker.x & attr" y1="8" y2="72"><title>${marker.title}</title></line></g>
     <rect class="period-band-selection" x.bind="bandX & attr" y="20" width.bind="bandWidth & attr" height="40" pointerdown.trigger="pointerDown($event, 'band')"></rect>
+    <line if.bind="referenceVisible" class="period-reference" x1.bind="referenceX & attr" x2.bind="referenceX & attr"
+      y1="0" y2="80" aria-label.bind="referenceLabel" pointerdown.trigger="pointerDown($event, 'pan')"><title>${referenceLabel}</title></line>
     <rect class="period-band-handle" x.bind="startX & attr" y="10" width="12" height="60"
       role="slider" tabindex="0" aria-label="Period start" aria-valuemin.bind="min" aria-valuemax.bind="draftEnd - 3600"
       aria-valuenow.bind="draftStart" aria-valuetext.bind="label(draftStart)"

@@ -18,6 +18,46 @@ function band() {
 const pointer = (clientX: number) => ({ button: 0, pointerId: 1, clientX, preventDefault: vi.fn() }) as unknown as PointerEvent;
 
 describe('recorded period band', () => {
+  it('positions the reference by timestamp and hides it outside the zoom instead of clamping it', () => {
+    const component = band();
+    component.referenceTime = 25 * HOUR;
+    expect(component.referenceVisible).toBe(true);
+    expect(component.referenceX).toBe(250);
+    component.viewport = { start: 20 * HOUR, end: 70 * HOUR }; component.viewportChanged();
+    expect(component.referenceX).toBe(100);
+    component.referenceTime = 10 * HOUR;
+    expect(component.referenceVisible).toBe(false);
+    component.referenceTime = null;
+    expect(component.referenceVisible).toBe(false);
+    component.referenceTime = 101 * HOUR;
+    component.resetZoom();
+    expect(component.referenceVisible).toBe(false);
+  });
+  it('restores a viewport independently of the selected period, clamps bounds and emits zoom and reset commits', () => {
+    const component = band();
+    component.viewCommit = vi.fn();
+    component.viewport = { start: 10 * HOUR, end: 70 * HOUR };
+    component.bound();
+    expect([component.viewStart, component.viewEnd]).toEqual([10 * HOUR, 70 * HOUR]);
+    expect([component.draftStart, component.draftEnd]).toEqual([20 * HOUR, 60 * HOUR]);
+    component.max = 50 * HOUR; component.maxChanged();
+    expect([component.viewStart, component.viewEnd]).toEqual([0, 50 * HOUR]);
+    component.wheel({ deltaY: -300, clientX: 500, shiftKey: false, preventDefault: vi.fn() } as unknown as WheelEvent);
+    expect(component.viewCommit).toHaveBeenLastCalledWith({ start: component.viewStart, end: component.viewEnd });
+    expect(component.commit).not.toHaveBeenCalled();
+    component.resetZoom();
+    expect(component.viewCommit).toHaveBeenLastCalledWith(null);
+  });
+  it('commits panning once on release instead of during each pointer move', () => {
+    const component = band();
+    component.viewport = { start: 10 * HOUR, end: 70 * HOUR }; component.bound();
+    component.viewCommit = vi.fn();
+    component.pointerDown(pointer(500), 'pan'); component.pointerMove(pointer(400));
+    expect(component.viewCommit).not.toHaveBeenCalled();
+    component.pointerUp(pointer(400));
+    expect(component.viewCommit).toHaveBeenCalledOnce();
+    expect(component.commit).not.toHaveBeenCalled();
+  });
   it('clamps and snaps reversed handle drags without requesting on each move', () => {
     const component = band();
     component.pointerDown(pointer(200), 'start'); component.pointerMove(pointer(1000));

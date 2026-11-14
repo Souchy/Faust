@@ -1,4 +1,7 @@
-use std::{collections::HashMap, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    time::Duration,
+};
 
 use axum::{
     Json, Router,
@@ -25,11 +28,21 @@ type ApiError = (StatusCode, String);
 pub struct GggState {
     jobs: Mutex<HashMap<String, Job>>,
     metadata_checked: Mutex<Option<Instant>>,
+    auto_errors: Mutex<HashMap<String, String>>,
+    paused: Mutex<HashSet<String>>,
 }
 
 struct Job {
     dto: ImportJob,
     cancel: watch::Sender<bool>,
+}
+
+struct AutomaticImport(watch::Sender<bool>);
+
+impl Drop for AutomaticImport {
+    fn drop(&mut self) {
+        self.0.send_replace(true);
+    }
 }
 
 #[derive(Clone, Deserialize)]
@@ -67,6 +80,72 @@ pub fn routes() -> Router<ServiceState> {
         .route("/api/v1/ggg/cancel", post(cancel))
 }
 
+pub async fn collect(
+    state: ServiceState,
+    mut selection: tokio::sync::watch::Receiver<Option<String>>,
+) {
+    let mut automatic: Option<AutomaticImport> = None;
+    loop {
+        let league = selection.borrow().clone();
+        if let Some(league) = league {
+            let attempt = async {
+                let launch = crate::analysis::league_start::lookup(&state, &league).await?;
+                let start = launch.start.ok_or((StatusCode::CONFLICT, "GGG collection requires a league launch.".into()))?
+                    .div_euclid(HOUR) * HOUR;
+                let end = Utc::now().timestamp().div_euclid(HOUR) * HOUR - HOUR;
+                if end < start { return Ok::<_, ApiError>(()); }
+                // Permanent leagues can predate retained API history by years.
+                if end - start > 2 * 366 * 86400 {
+                    return Err((StatusCode::CONFLICT, "Automatic full-launch GGG catch-up is unavailable for leagues older than two years; import a supported historical range manually.".into()));
+                }
+                let jobs = state.ggg.jobs.lock().await;
+                let running = jobs.get(&league).is_some_and(|job| job.dto.status == "running");
+                drop(jobs);
+                let paused = state.ggg.paused.lock().await.contains(&league);
+                if !running && !paused {
+                    let range = Range { league: league.clone(), start, end };
+                    let coverage = import_coverage(&state, &range).await?;
+                    if coverage.completed_hours.len() as u64 != coverage.expected_hours {
+                        start_archive_import(state.clone(), range).await?;
+                        automatic = state.ggg.jobs.lock().await.get(&league).map(|job| AutomaticImport(job.cancel.clone()));
+                    }
+                }
+                Ok(())
+            }.await;
+            if let Err(error) = attempt {
+                eprintln!("Automatic GGG collection for {league}: {}", error.1);
+                state.ggg.auto_errors.lock().await.insert(league, error.1);
+            } else {
+                state.ggg.auto_errors.lock().await.remove(&league);
+            }
+        }
+
+        tokio::select! {
+            changed = selection.changed() => {
+                drop(automatic.take());
+                if changed.is_err() { return; }
+            }
+            _ = tokio::time::sleep(Duration::from_secs(60)) => {}
+        }
+    }
+}
+
+pub(crate) async fn collection_status(
+    state: &ServiceState,
+    league: &str,
+) -> (Option<ImportJob>, Option<String>) {
+    (
+        state
+            .ggg
+            .jobs
+            .lock()
+            .await
+            .get(league)
+            .map(|job| job.dto.clone()),
+        state.ggg.auto_errors.lock().await.get(league).cloned(),
+    )
+}
+
 fn bad(error: impl ToString) -> ApiError {
     (StatusCode::BAD_REQUEST, error.to_string())
 }
@@ -85,12 +164,12 @@ async fn markets(
 ) -> Result<Json<dto::Overview>, ApiError> {
     validate(&query.league, query.hour, query.hour)?;
     let complete = state
-        .store
+        .economy_store
         .ggg_hour_complete(&query.league, query.hour)
         .await
         .map_err(failure)?;
     let markets = state
-        .store
+        .economy_store
         .ggg_markets(&query.league, query.hour)
         .await
         .map_err(failure)?;
@@ -109,7 +188,7 @@ async fn coverage(
 ) -> Result<Json<dto::Coverage>, ApiError> {
     validate(&query.league, query.start, query.end)?;
     state
-        .store
+        .economy_store
         .ggg_coverage(&query.league, query.start, query.end)
         .await
         .map(Json)
@@ -128,7 +207,7 @@ async fn history(
         return Err(bad("Invalid market ID."));
     }
     state
-        .store
+        .economy_store
         .ggg_history(&query.league, &query.market, query.start, query.end)
         .await
         .map(Json)
@@ -156,6 +235,7 @@ async fn cancel(
     Json(query): Json<League>,
 ) -> Result<Json<Option<ImportJob>>, ApiError> {
     dto::validate_league(&query.league).map_err(bad)?;
+    state.ggg.paused.lock().await.insert(query.league.clone());
     let mut jobs = state.ggg.jobs.lock().await;
     let job = jobs.get_mut(&query.league);
     if let Some(job) = job {
@@ -193,7 +273,7 @@ async fn import_coverage(state: &ServiceState, range: &Range) -> Result<dto::Cov
     };
     for (start, end) in range_chunks(range) {
         let coverage = state
-            .store
+            .economy_store
             .ggg_coverage(&range.league, start, end)
             .await
             .map_err(failure)?;
@@ -272,6 +352,7 @@ async fn start_job(state: ServiceState, query: Range) -> Result<ImportJob, ApiEr
         )
     })?;
     let coverage = import_coverage(&state, &query).await?;
+    state.ggg.paused.lock().await.remove(&query.league);
     let (sender, mut receiver) = watch::channel(false);
     let job = ImportJob {
         league: query.league.clone(),
@@ -302,7 +383,7 @@ async fn start_job(state: ServiceState, query: Range) -> Result<ImportJob, ApiEr
         let mut metadata_warning = None;
         for (start, end) in range_chunks(&query) {
             match state
-                .store
+                .economy_store
                 .ggg_metadata_summary(&query.league, start, end)
                 .await
             {
@@ -375,7 +456,7 @@ async fn run_import(state: &ServiceState, range: &Range, exchange_url: &str) -> 
     }
     for hour in (range.start..=range.end).step_by(HOUR as usize) {
         if state
-            .store
+            .economy_store
             .ggg_hour_complete(&range.league, hour)
             .await
             .map_err(|e| e.to_string())?
@@ -388,7 +469,7 @@ async fn run_import(state: &ServiceState, range: &Range, exchange_url: &str) -> 
         let page = fetch_hour(&client, hour, exchange_url).await;
         let result = match page {
             Ok(page) => state
-                .store
+                .economy_store
                 .record_ggg_hour(&range.league, hour, &page)
                 .await
                 .map_err(|e| e.to_string()),
@@ -396,7 +477,7 @@ async fn run_import(state: &ServiceState, range: &Range, exchange_url: &str) -> 
         };
         if let Err(error) = result {
             state
-                .store
+                .economy_store
                 .record_ggg_failure(&range.league, hour, &error)
                 .await
                 .map_err(|e| e.to_string())?;
@@ -605,7 +686,7 @@ fn fallback_items() -> Vec<Item> {
 }
 
 async fn load_metadata(state: &ServiceState, client: &reqwest::Client) -> Result<(), String> {
-    let store = &state.store;
+    let store = &state.economy_store;
     let now = Utc::now().timestamp();
     if state
         .ggg

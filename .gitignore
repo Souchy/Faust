@@ -1,5 +1,6 @@
 *.sqlite3*
 *.import.lock
+*.settings.json
 
 # Frontend dependencies and generated assets
 node_modules/
