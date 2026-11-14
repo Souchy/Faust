@@ -128,9 +128,10 @@ export class MarketApi {
   leagueStart(league: string, signal: AbortSignal): Promise<LeagueStart> {
     return this.request(`/api/v1/analysis/league-start?${new URLSearchParams({ league })}`, signal);
   }
-  gggPrices(league: string, category: string, currentLeague: string, date: string, signal: AbortSignal, item?: string): Promise<GggPrices> {
+  gggPrices(league: string, category: string, currentLeague: string, date: string, signal: AbortSignal, item?: string, compareLeague?: string): Promise<GggPrices> {
     const query = new URLSearchParams({ league, category, current_league: currentLeague, date });
     if (item) query.set('item', item);
+    if (compareLeague) query.set('compare_league', compareLeague);
     return this.request(`/api/v1/ggg/prices?${query}`, signal);
   }
   economyComparison(league: string, category: string, source: EconomySource, currentLeague: string, date: string,

@@ -1,15 +1,15 @@
 use std::collections::{BTreeMap, HashMap};
 
 use axum::{
-    Json,
     extract::{Query, State},
     http::StatusCode,
+    Json,
 };
 use chrono::{NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 
-use super::{ApiError, CHAOS, Quote, chaos_rates, failure, number, quotes, utc_hour};
-use crate::{ServiceState, analysis::league_start};
+use super::{chaos_rates, failure, number, quotes, utc_hour, ApiError, Quote, CHAOS};
+use crate::{analysis::league_start, ServiceState};
 use market_core::{
     economy::{Line, Overview},
     ggg::{Item, Market},
@@ -22,6 +22,7 @@ pub(super) struct PriceQuery {
     league: String,
     category: String,
     current_league: String,
+    compare_league: Option<String>,
     #[serde(default)]
     date: String,
     item: Option<String>,
@@ -222,11 +223,32 @@ pub(super) async fn ninja_prices(
             }
         })
         .unwrap_or_else(|| source.to_owned());
-    let current_overview = state
+    let mut current_overview = state
         .economy_store
         .current_economy(&query.current_league, &query.category, &current_source)
         .await
         .map_err(failure)?;
+    if current_overview.is_none() {
+        let dates = state
+            .economy_store
+            .economy_dates(&query.current_league, &query.category, &current_source)
+            .await
+            .map_err(failure)?;
+        if let Some(date) = dates.first() {
+            current_overview = Some(
+                state
+                    .economy_store
+                    .historical_economy(
+                        &query.current_league,
+                        &query.category,
+                        &current_source,
+                        date,
+                    )
+                    .await
+                    .map_err(failure)?,
+            );
+        }
+    }
     let current_item = query
         .item
         .as_ref()
@@ -340,7 +362,13 @@ pub(super) async fn prices(
             .min(now)
     };
     let selected_launch = league_start::lookup(&state, &query.league).await?;
-    let current_launch = league_start::lookup(&state, &query.current_league).await?;
+    let comparison = query
+        .compare_league
+        .as_deref()
+        .unwrap_or(&query.current_league);
+    market_core::ggg::validate_league(comparison)
+        .map_err(|error| (StatusCode::BAD_REQUEST, error.to_string()))?;
+    let current_launch = league_start::lookup(&state, comparison).await?;
     let launch = selected_launch.start.ok_or((
         StatusCode::CONFLICT,
         "Selected league launch unavailable.".into(),
@@ -395,11 +423,11 @@ pub(super) async fn prices(
     let current_start = (current_launch_time + (start - launch)).div_euclid(HOUR) * HOUR;
     let current_end = (current_launch_time + (end - launch)).div_euclid(HOUR) * HOUR;
     let current_end = current_end.min(now);
-    let current_markets = if query.league != query.current_league && current_end >= current_start {
+    let current_markets = if query.league != comparison && current_end >= current_start {
         state
             .economy_store
             .ggg_price_markets(
-                &query.current_league,
+                comparison,
                 current_start,
                 current_end,
                 &query.category,
@@ -411,7 +439,7 @@ pub(super) async fn prices(
         Vec::new()
     };
     let mut selected = hourly_samples(&selected_markets, &items, start, end);
-    let mut current = if query.league == query.current_league {
+    let mut current = if query.league == comparison {
         HashMap::new()
     } else {
         hourly_samples(&current_markets, &items, current_start, current_end)
@@ -481,7 +509,15 @@ pub(super) async fn prices(
     }
     let (collection, collection_error) =
         crate::ggg::collection_status(&state, &query.current_league).await;
-    let collection_start = current_launch_time.div_euclid(HOUR) * HOUR;
+    let target_launch = league_start::lookup(&state, &query.current_league).await?;
+    let collection_start = target_launch
+        .start
+        .ok_or((
+            StatusCode::CONFLICT,
+            "Target league launch unavailable.".into(),
+        ))?
+        .div_euclid(HOUR)
+        * HOUR;
     let collection = if now >= collection_start && now - collection_start <= 2 * 366 * 86400 {
         Some(
             crate::ggg::archive_status(
@@ -516,7 +552,7 @@ pub(super) async fn prices(
         },
         launch,
         current_launch: current_launch_time,
-        current_league: query.current_league,
+        current_league: comparison.to_owned(),
         trends,
         warnings,
         collection,
@@ -545,12 +581,16 @@ mod tests {
             .unwrap();
             store.record_ggg_hour("Test", hour, &page).await.unwrap();
         }
+        store
+            .save_league_launch("Old", end - 24 * HOUR, "GGG")
+            .await
+            .unwrap();
         drop(store);
         let store = market_store::SqliteStore::connect(&path).await.unwrap();
         let (sender, _) = tokio::sync::watch::channel(None);
         let state = ServiceState::new(store, "test", sender);
         let result = prices(
-            State(state),
+            State(state.clone()),
             Query(PriceQuery {
                 league: "Test".into(),
                 current_league: "Test".into(),
@@ -558,6 +598,7 @@ mod tests {
                 date: String::new(),
                 item: None,
                 source: None,
+                compare_league: None,
             }),
         )
         .await
@@ -568,6 +609,25 @@ mod tests {
         assert_eq!(collection.completed_hours, 2);
         assert_eq!(collection.total_hours, 2);
         assert!(result.overview.lines.is_empty());
+        let compared = prices(
+            State(state),
+            Query(PriceQuery {
+                league: "Test".into(),
+                current_league: "Test".into(),
+                compare_league: Some("Old".into()),
+                category: "Currency".into(),
+                date: String::new(),
+                item: None,
+                source: None,
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(compared.overview.league, "Test");
+        assert_eq!(compared.current_league, "Old");
+        assert_eq!(compared.current_launch, end - 24 * HOUR);
+        assert_eq!(compared.collection.unwrap().total_hours, 2);
     }
 
     #[tokio::test]
@@ -639,6 +699,7 @@ mod tests {
                     category: "SkillGem".into(),
                     date: "1970-01-01".into(),
                     source: Some("stash".into()),
+                    compare_league: None,
                     item,
                 }),
             )
@@ -653,6 +714,31 @@ mod tests {
             assert_eq!(trend.current[0].granularity, "snapshot");
             assert_eq!(trend.current[0].volume.as_deref(), Some("20"));
         }
+        let reversed = ninja_prices(
+            State(state),
+            Query(PriceQuery {
+                league: "New".into(),
+                current_league: "Old".into(),
+                compare_league: None,
+                category: "SkillGem".into(),
+                date: String::new(),
+                source: Some("stash".into()),
+                item: Some("live-id".into()),
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(reversed.overview.league, "New");
+        assert_eq!(
+            reversed.trends["live-id"].selected[0].price.as_deref(),
+            Some("100")
+        );
+        assert_eq!(
+            reversed.trends["live-id"].current[0].price.as_deref(),
+            Some("10")
+        );
+        assert_eq!(reversed.trends["live-id"].current[0].granularity, "daily");
     }
 
     #[tokio::test]
@@ -715,13 +801,11 @@ mod tests {
                 );
             }
         }
-        assert!(
-            store
-                .ggg_price_markets("Test", HOUR, HOUR, "Oil", None)
-                .await
-                .unwrap()
-                .is_empty()
-        );
+        assert!(store
+            .ggg_price_markets("Test", HOUR, HOUR, "Oil", None)
+            .await
+            .unwrap()
+            .is_empty());
     }
 
     #[tokio::test]
@@ -775,19 +859,18 @@ mod tests {
                 date: String::new(),
                 item: None,
                 source: None,
+                compare_league: None,
             })
         };
         let result = prices(State(state.clone()), query()).await.unwrap().0;
         assert_eq!(result.overview.lines[0].price.as_deref(), Some("10"));
         assert_eq!(result.overview.lines[0].volume.as_deref(), Some("10"));
         assert_eq!(result.overview.source, "ggg");
-        assert!(
-            store
-                .latest_ggg_hour("Test", HOUR * 2)
-                .await
-                .unwrap()
-                .is_none()
-        );
+        assert!(store
+            .latest_ggg_hour("Test", HOUR * 2)
+            .await
+            .unwrap()
+            .is_none());
         let empty =
             serde_json::from_value(serde_json::json!({"next_change_id":HOUR * 3,"markets":[]}))
                 .unwrap();

@@ -31,7 +31,7 @@ export class MarketApp {
           { path: ['prices', 'exchange', 'triangular-arbitrage', 'arbitrage'], redirectTo: 'flips' },
         ]),
         { path: 'gems', component: GemFlipping, title: 'Gem flipping' },
-        { path: 'flips', component: FlipAnalysis, title: 'Flip analysis' },
+        { path: 'flips', component: FlipAnalysis, title: 'Fliper' },
         { path: 'settings', component: SettingsPage, title: 'Settings' },
       ],
     };
@@ -66,12 +66,20 @@ export class MarketApp {
       this.prices?.clearFilters();
       this.prices?.closeDetail();
     }
+
     if (this.gems) await this.gems.selectDataset(value);
     else await this.session.selectDataset(value);
     if (this.prices) await this.prices.load();
     if (this.session.exchange) await this.session.exchange.datasetChanged();
     if (this.session.flips) await this.session.flips.datasetChanged();
     if (this.session.triangularArbitrage) await this.session.triangularArbitrage.refresh();
+  }
+
+  async selectCompareLeague(league: string): Promise<void> {
+    const saving = this.session.selectCompareLeague(league);
+    if (this.session.flips) await this.session.flips.datasetChanged();
+    if (this.prices) await this.prices.load();
+    await saving;
   }
 
   async refresh(): Promise<void> {
@@ -84,7 +92,7 @@ export class MarketApp {
   }
 
   async browseArchive(archive: EconomyArchive): Promise<void> {
-    await this.selectDataset(`archive:${archive.league ?? archive.name}`);
-    await this.router.load(this.devMode ? '/prices' : '/flips');
+    await this.selectCompareLeague(archive.league ?? archive.name);
+    await this.router.load('/flips');
   }
 }

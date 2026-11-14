@@ -13,7 +13,7 @@ fn window_title(name: &str, version: &str, debug: bool) -> String {
 fn main() {
     let builder = tauri::Builder::default()
         .manage(settings::ClientSettings::default())
-        .invoke_handler(tauri::generate_handler![settings::load_flip_period, settings::save_flip_period])
+        .invoke_handler(tauri::generate_handler![settings::load_flip_period, settings::save_flip_period, settings::load_compare_league, settings::save_compare_league])
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(updates::UpdateCheck::default())

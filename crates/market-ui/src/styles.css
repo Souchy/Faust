@@ -55,10 +55,10 @@ period-band { display: block; min-width: 0; width: 100%; }
 .historical-page ul, .historical-page ol { padding-left: 24px; }
 .historical-page a { color: #a9cbef; }
 .analysis-heading { position: relative; display: flex; align-items: center; gap: 8px; }
-.analysis-info summary { display: grid; place-items: center; width: 24px; height: 24px; padding: 0; border-radius: 50%; list-style: none; font-weight: 600; }
-.analysis-info summary::-webkit-details-marker { display: none; }
-.analysis-info summary:focus-visible { outline: 2px solid #a9cbef; outline-offset: 2px; }
-.analysis-info[open] summary { border-color: #a9cbef; color: #a9cbef; }
+.analysis-info > summary { display: grid; place-items: center; width: 24px; height: 24px; padding: 0; border-radius: 50%; list-style: none; font-weight: 600; }
+.analysis-info > summary::-webkit-details-marker { display: none; }
+.analysis-info > summary:focus-visible { outline: 2px solid #a9cbef; outline-offset: 2px; }
+.analysis-info[open] > summary { border-color: #a9cbef; color: #a9cbef; }
 .analysis-info-content { position: absolute; top: calc(100% + 8px); left: 0; z-index: 20; width: min(42rem, 100%); max-height: min(60vh, 28rem); overflow: auto; padding: 12px 16px; border: 1px solid #484848; border-radius: 6px; background: #161616; box-shadow: 0 6px 20px #0008; line-height: 1.5; overflow-wrap: anywhere; }
 .analysis-info-content > p:first-child { margin-top: 0; }
 .analysis-info-content > :last-child { margin-bottom: 0; }
@@ -86,6 +86,8 @@ input[type="checkbox"] { accent-color: #bdbdbd; }
 .app-header nav { display: flex; flex-shrink: 0; gap: 8px; white-space: nowrap; }
 .app-header > button { flex-shrink: 0; }
 .league-picker { flex-shrink: 0; margin-left: auto; }
+.league-picker + .league-picker { margin-left: 0; }
+.league-picker select { width: 100px; }
 .as-of-picker { flex-shrink: 0; }
 .settings-button { display: inline-flex; align-items: center; justify-content: center; width: 36px; height: 36px; padding: 0; font-size: 20px; line-height: 1; }
 .muted { color: #aaaaaa; }
@@ -151,6 +153,7 @@ tbody tr:hover { background: #161616; }
 .negative, .error { color: #e28c82; }
 .banner { padding: 12px; margin-top: 12px; border: 1px solid #854c47; background: #161616; border-radius: 4px; }
 .empty { padding: 40px 20px; text-align: center; color: #aaaaaa; white-space: normal; }
+.comparison-actions { display: flex; align-items: center; justify-content: center; flex-wrap: wrap; gap: 8px; }
 footer { display: flex; justify-content: center; align-items: center; gap: 16px; }
 
 .economy h1, .settings h1 { font-size: 20px; margin: 0 0 4px; font-weight: 600; }

@@ -10,6 +10,15 @@ import { MarketSession } from '../../services/market-session';
 export class FlipAnalysis {
   private readonly api = resolve(MarketApi);
   readonly session = resolve(MarketSession);
+  get compareLeague(): string { return this.session.compareLeague; }
+  async selectCompareLeague(league: string): Promise<void> {
+    const saving = this.session.selectCompareLeague(league);
+    await this.datasetChanged();
+    await saving;
+  }
+  requestImports(event: Event): void {
+    (event.currentTarget as HTMLElement).dispatchEvent(new CustomEvent('open-imports', { bubbles: true }));
+  }
   private request: AbortController | null = null;
   private detailRequest: AbortController | null = null;
   private periodRequest: AbortController | null = null;
@@ -43,7 +52,7 @@ export class FlipAnalysis {
     this.referenceTimer = null;
     this.currentLaunch = null; this.selectedLaunch = null;
     this.referenceTime = null; this.referenceLabel = ''; this.referenceError = '';
-    const current = this.currentLeagueName, selected = this.session.selectedLeagueName;
+    const current = this.currentLeagueName, selected = this.compareLeague;
     if (!current) { this.referenceError = 'Current league equivalent unavailable: select a live league.'; return; }
     const request = this.referenceRequest = new AbortController();
     try {
@@ -51,7 +60,7 @@ export class FlipAnalysis {
       const [currentLaunch, selectedLaunch] = await Promise.all([
         currentPromise, current === selected ? currentPromise : this.api.leagueStart(selected, request.signal),
       ]);
-      if (request.signal.aborted || current !== this.currentLeagueName || selected !== this.session.selectedLeagueName) return;
+      if (request.signal.aborted || current !== this.currentLeagueName || selected !== this.compareLeague) return;
       if (currentLaunch.league !== current || selectedLaunch.league !== selected) throw new Error('Launch metadata belongs to a different league.');
       if (currentLaunch.start == null || selectedLaunch.start == null) throw new Error('No official launch or saved dataset start is available.');
       this.currentLaunch = currentLaunch; this.selectedLaunch = selectedLaunch;
@@ -107,8 +116,9 @@ export class FlipAnalysis {
   currentAvailabilityLoading = false;
   currentAvailabilityError = '';
   get currentLeagueName(): string {
-    return this.session.leagues.find(league => league.id === this.session.selectedLeagueId)?.name ?? '';
+    return this.session.targetLeagueName;
   }
+  private get targetLeagueId(): string { return this.session.historicalLeague || this.session.selectedLeagueId; }
   availabilityAge(value: string): string {
     const minutes = Math.max(0, Math.floor((Date.now() - new Date(value).getTime()) / 60_000));
     if (!Number.isFinite(minutes)) return 'Update time unknown';
@@ -142,12 +152,12 @@ export class FlipAnalysis {
   private async loadCurrentAvailability(result: FlipAnalysisResult): Promise<void> {
     if (!result.rows.length) return;
     const request = this.availabilityRequest = new AbortController();
-    const league = this.session.selectedLeagueId;
+    const league = this.targetLeagueId;
     this.currentAvailabilityLoading = true;
     try {
       if (!league) throw new Error('Select a live league to check current availability.');
       const response = await this.api.currentAvailability(league, result.rows, request.signal);
-      if (request.signal.aborted || this.result !== result || league !== this.session.selectedLeagueId) return;
+      if (request.signal.aborted || this.result !== result || league !== this.targetLeagueId) return;
       if (response.league !== league) throw new Error('Availability response belongs to a different league.');
       const items: Record<string, CurrentItemAvailability> = {};
       const trends: typeof this.currentTrends = {};
@@ -167,7 +177,7 @@ export class FlipAnalysis {
       this.currentAvailability = items;
       this.currentTrends = trends;
     } catch (error) {
-      if (!request.signal.aborted && this.result === result && league === this.session.selectedLeagueId) {
+      if (!request.signal.aborted && this.result === result && league === this.targetLeagueId) {
         this.currentAvailabilityError = `Current-league availability unavailable: ${error instanceof Error ? error.message : String(error)}`;
       }
     } finally {
@@ -183,7 +193,7 @@ export class FlipAnalysis {
     this.chartsLoading = true;
     try {
       const response = await this.api.flipSparklines(result.league, result.start, result.end, result.rows, request.signal);
-      if (request.signal.aborted || this.result !== result || result.league !== this.session.selectedLeagueName) return;
+      if (request.signal.aborted || this.result !== result || result.league !== this.compareLeague) return;
       const charts: Record<string, FlipSparklineView> = {};
       for (const row of result.rows) {
         const series = response.series.find((series) => series.id === row.id);
@@ -219,7 +229,7 @@ export class FlipAnalysis {
   get endText(): string { return this.end.replace('T', ' '); }
   set endText(value: string) { this.end = value.replace(' ', 'T'); }
   get canAnalyze(): boolean {
-    return this.periodLeague === this.session.selectedLeagueName && this.period?.start != null
+    return !!this.compareLeague && this.periodLeague === this.compareLeague && this.period?.start != null
       && this.period?.end != null && this.maximum > this.minimum;
   }
   get availabilityMessage(): string {
@@ -303,13 +313,32 @@ export class FlipAnalysis {
     } finally { if (this.detailRequest === request) this.historyLoading = false; }
   }
   async datasetChanged(force = true): Promise<void> {
+    if (!this.compareLeague) {
+      this.flushSettings();
+      this.referenceRequest?.abort();
+      if (this.referenceTimer) clearInterval(this.referenceTimer);
+      this.referenceTimer = null;
+      this.periodRequest?.abort(); this.request?.abort(); this.detailRequest?.abort();
+      if (this.searchTimer) clearTimeout(this.searchTimer);
+      this.searchTimer = null;
+      this.cancelSparklines();
+      this.period = null; this.result = null; this.periodLeague = ''; this.loadedLeague = '';
+      this.start = ''; this.end = ''; this.viewport = null;
+      Object.assign(this, this.defaultFilters());
+      this.isLoading = false; this.periodLoading = false; this.historyLoading = false;
+      this.referenceTime = null; this.referenceLabel = ''; this.error = ''; this.referenceError = '';
+      this.currentLaunch = null; this.selectedLaunch = null;
+      this.history = null; this.ninjaHistory = null; this.historyRow = '';
+      this.historyError = '';
+      return;
+    }
     const reference = this.loadReference();
     this.cancelSparklines();
     this.periodRequest?.abort(); this.request?.abort(); this.detailRequest?.abort();
     this.isLoading = false;
     if (this.searchTimer) { clearTimeout(this.searchTimer); this.searchTimer = null; this.offset = 0; }
     const request = this.periodRequest = new AbortController();
-    const league = this.session.selectedLeagueName;
+    const league = this.compareLeague;
     const changed = this.periodLeague !== league;
     this.flushSettings();
     if (changed) {
@@ -325,7 +354,7 @@ export class FlipAnalysis {
         restore ? this.loadSavedPeriod(league, request.signal) : Promise.resolve(null),
         reference,
       ]);
-      if (request.signal.aborted || league !== this.session.selectedLeagueName) return;
+      if (request.signal.aborted || league !== this.compareLeague) return;
       if (saved) {
         this.setRange(saved.start, saved.end);
         this.viewport = saved.viewport ?? null;
@@ -368,8 +397,8 @@ export class FlipAnalysis {
       }
       return saved;
     } catch (error) {
-      if (!signal.aborted && league === this.session.selectedLeagueName) {
-        this.settingsError = `Unable to restore Flip analysis period: ${error instanceof Error ? error.message : String(error)}`;
+      if (!signal.aborted && league === this.compareLeague) {
+        this.settingsError = `Unable to restore Fliper period: ${error instanceof Error ? error.message : String(error)}`;
       }
       return null;
     }
@@ -395,12 +424,12 @@ export class FlipAnalysis {
     if (!this.canAnalyze) return;
     if (this.settingsTimer) clearTimeout(this.settingsTimer);
     try {
-      this.pendingSettings = { league: this.session.selectedLeagueName,
+      this.pendingSettings = { league: this.compareLeague,
         settings: { ...this.enteredRange(), viewport: this.viewport, filters: this.filterSettings() } };
       this.settingsTimer = setTimeout(() => this.flushSettings(), 200);
     } catch (error) {
       this.pendingSettings = null;
-      this.settingsError = `Unable to save Flip analysis settings: ${error instanceof Error ? error.message : String(error)}`;
+      this.settingsError = `Unable to save Fliper settings: ${error instanceof Error ? error.message : String(error)}`;
     }
   }
   private flushSettings(): void {
@@ -426,10 +455,10 @@ export class FlipAnalysis {
     this.offset = Math.max(0, this.offset + direction * 100); await this.refresh(false);
   }
   async analyze(): Promise<void> {
-    const league = this.session.selectedLeagueName;
+    const league = this.compareLeague;
     this.offset = 0;
     await this.datasetChanged();
-    if (league === this.session.selectedLeagueName) await this.savePeriod();
+    if (league === this.compareLeague) await this.savePeriod();
   }
   private enteredRange(): { start: number; end: number } {
     // Retain absolute timestamps when a band selection falls in a repeated local DST hour.
@@ -447,7 +476,7 @@ export class FlipAnalysis {
   }
   async savePeriod(): Promise<void> {
     if (!this.canAnalyze) return;
-    const league = this.session.selectedLeagueName;
+    const league = this.compareLeague;
     try {
       const range = this.enteredRange();
       if (this.settingsTimer) clearTimeout(this.settingsTimer);
@@ -456,25 +485,25 @@ export class FlipAnalysis {
         ...range, viewport: this.viewport, filters: this.filterSettings(),
       });
     } catch (error) {
-      if (league === this.session.selectedLeagueName) {
-        this.settingsError = `Unable to save Flip analysis period: ${error instanceof Error ? error.message : String(error)}`;
+      if (league === this.compareLeague) {
+        this.settingsError = `Unable to save Fliper period: ${error instanceof Error ? error.message : String(error)}`;
       }
     }
   }
   private async persistSettings(league: string, settings: FlipPeriodSelection): Promise<void> {
     try {
       await this.session.saveFlipPeriod(league, settings);
-      if (league === this.session.selectedLeagueName) this.settingsError = '';
+      if (league === this.compareLeague) this.settingsError = '';
     } catch (error) {
-      if (league === this.session.selectedLeagueName) {
-        this.settingsError = `Unable to save Flip analysis settings: ${error instanceof Error ? error.message : String(error)}`;
+      if (league === this.compareLeague) {
+        this.settingsError = `Unable to save Fliper settings: ${error instanceof Error ? error.message : String(error)}`;
       }
     }
   }
   async refresh(resetOffset = true): Promise<void> {
     this.cancelSparklines();
     if (this.searchTimer) { clearTimeout(this.searchTimer); this.searchTimer = null; }
-    if (!this.period || this.periodLeague !== this.session.selectedLeagueName) { await this.datasetChanged(); return; }
+    if (!this.period || this.periodLeague !== this.compareLeague) { await this.datasetChanged(); return; }
     if (!this.periodLoading) this.queueSettingsSave();
     if (resetOffset) this.offset = 0;
     this.request?.abort(); this.detailRequest?.abort();
@@ -496,12 +525,12 @@ export class FlipAnalysis {
       if (this.minConfidence) filters.min_confidence = this.minConfidence;
       if (this.strictStart) filters.strict_start = 'true';
       if (this.presence) {
-        if (!this.session.selectedLeagueId) throw new Error('Select a live league before filtering current presence.');
-        filters.presence = this.presence; filters.current_league = this.session.selectedLeagueId;
+        if (!this.targetLeagueId) throw new Error('Select a Target league before filtering current presence.');
+        filters.presence = this.presence; filters.current_league = this.targetLeagueId;
       }
-      const league = this.session.selectedLeagueName;
+      const league = this.compareLeague;
       const result = await this.api.flips(league, start, end, filters, request.signal);
-      if (!request.signal.aborted && league === this.session.selectedLeagueName) {
+      if (!request.signal.aborted && league === this.compareLeague) {
         this.result = result; this.loadedLeague = league; this.offset = result.offset;
         void this.loadSparklines(result);
         void this.loadCurrentAvailability(result);

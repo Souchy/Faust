@@ -32,11 +32,11 @@
       <p if.bind="isLoading" class="muted" role="status">Loading ${currentCategory.name ?? 'economy'}...</p>
       <p if.bind="iconError" class="error" role="alert">${iconError}</p>
       <p repeat.for="warning of warnings" class="muted" role="status">${warning}</p>
-      <p if.bind="source === 'ggg' && gggData.collection" class="muted" role="status">GGG ${gggData.current_league}: ${gggData.collection.status} · ${format(gggData.collection.completed_hours)} / ${format(gggData.collection.total_hours)} hours downloaded.${gggData.collection.status === 'cancelled' ? ' Automatic collection is paused; resume from Currency Exchange.' : ''}</p>
+      <p if.bind="source === 'ggg' && gggData.collection" class="muted" role="status">GGG ${gggData.collection.league || browsingLeague}: ${gggData.collection.status} · ${format(gggData.collection.completed_hours)} / ${format(gggData.collection.total_hours)} hours downloaded.${gggData.collection.status === 'cancelled' ? ' Automatic collection is paused; resume from Currency Exchange.' : ''}</p>
       <p if.bind="source === 'ggg' && (gggData.collection_error || gggData.collection.error)" class="error" role="alert">${gggData.collection_error || gggData.collection.error}</p>
       <p if.bind="source === 'ggg' && gggData.collection.warning" class="muted" role="status">${gggData.collection.warning}</p>
       <p if.bind="comparisonError" class="error" role="alert">${comparisonError}</p>
-      <p if.bind="gggData && browsingLeague !== league" class="comparison-legend"><span>${browsingLeague}</span><span class="current-comparison">${league}</span> · Aligned by league age; shared price and volume scales.</p>
+      <p if.bind="gggData && browsingLeague !== gggData.current_league" class="comparison-legend"><span>${browsingLeague}</span><span class="current-comparison">${gggData.current_league}</span> · Aligned by league age; shared price and volume scales.</p>
       <div show.bind="!selectedItem" class="economy-list">
         <div class="economy-filters">
           <input type="search" aria-label="Search economy items" placeholder="Search items or variants..." value.bind="search" input.trigger="updateLines()">

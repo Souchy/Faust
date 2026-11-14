@@ -2,8 +2,27 @@ import { invoke, isTauri } from '@tauri-apps/api/core';
 import type { FlipPeriodSelection } from '../core/api-types';
 
 const storageKey = 'faust.flip-periods';
+const compareKey = 'faust.compare-league';
 
 export class ClientSettings {
+  async loadCompareLeague(): Promise<string> {
+    const value: unknown = isTauri() ? await invoke('load_compare_league') : localStorage.getItem(compareKey) ?? '';
+    return this.validateCompareLeague(value);
+  }
+
+  async saveCompareLeague(league: string): Promise<void> {
+    this.validateCompareLeague(league);
+    if (isTauri()) return invoke('save_compare_league', { league });
+    localStorage.setItem(compareKey, league);
+  }
+
+  private validateCompareLeague(value: unknown): string {
+    if (typeof value !== 'string' || value.length > 200 || (value !== '' && value.trim() !== value)) {
+      throw new Error('Invalid Compare league setting.');
+    }
+    return value;
+  }
+
   async loadFlipPeriod(league: string): Promise<FlipPeriodSelection | null> {
     if (isTauri()) return invoke('load_flip_period', { league });
     const periods = this.readBrowserPeriods();

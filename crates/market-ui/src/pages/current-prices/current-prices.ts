@@ -180,7 +180,7 @@ export class CurrentPrices {
   }
 
   get browsingLeague(): string { return this.dataset || this.league; }
-  private get contextKey(): string { return JSON.stringify([this.browsingLeague, this.category, this.source, this.date]); }
+  private get contextKey(): string { return JSON.stringify([this.browsingLeague, this.category, this.source, this.date, this.session.compareLeague]); }
   get historical(): boolean {
     return !!this.date || !!this.dataset;
   }
@@ -257,7 +257,7 @@ export class CurrentPrices {
       const start = Date.parse(dates[this.periodStart] ?? '') / 1000, end = Date.parse(dates[this.periodEnd] ?? '') / 1000;
       const inside = (point: { time: number }) => point.time >= start && point.time <= end;
       const chart = comparisonChart({ selected: aligned.selected.filter(inside), current: aligned.current.filter(inside) },
-        this.gggHistory.launch, [this.browsingLeague, this.league]);
+        this.gggHistory.launch, [this.browsingLeague, this.gggHistory.current_league]);
       return chart ? [chart] : [];
     }
     return historySeries(this.periodPoints).map(chart => ({ ...chart, currentSegments: [], currentDots: '', currentVolume: '' }));
@@ -417,12 +417,12 @@ export class CurrentPrices {
     try {
       if (this.source === 'ggg') {
         const requestedDate = this.date;
-        let data = await this.api.gggPrices(this.browsingLeague, this.category, this.league, requestedDate, request.signal);
+        let data = await this.api.gggPrices(this.browsingLeague, this.category, this.league, requestedDate, request.signal, undefined, this.session.compareLeague || this.browsingLeague);
         if (this.request !== request) return;
         this.dates = data.dates ?? [];
         if (this.dataset && this.dates.length && !this.dates.includes(this.date)) {
           this.date = this.dates[0]!;
-          if (requestedDate) data = await this.api.gggPrices(this.browsingLeague, this.category, this.league, this.date, request.signal);
+          if (requestedDate) data = await this.api.gggPrices(this.browsingLeague, this.category, this.league, this.date, request.signal, undefined, this.session.compareLeague || this.browsingLeague);
           if (this.request !== request) return;
         }
         this.applyGgg(data);
@@ -439,9 +439,9 @@ export class CurrentPrices {
       const overview = await this.api.economy(this.browsingLeague, this.category, this.source, this.date, request.signal,
         refresh && !this.historical);
       if (this.request === request) { this.overview = overview; this.loadedContext = this.contextKey; this.updateLines(); }
-      if (this.request === request && this.historical) {
+      if (this.request === request && (this.historical || this.session.compareLeague)) {
         try {
-          const data = await this.api.economyComparison(this.browsingLeague, this.category, this.source, this.league, this.date, request.signal);
+          const data = await this.api.economyComparison(this.browsingLeague, this.category, this.source, this.session.compareLeague || this.browsingLeague, this.date, request.signal);
           if (this.request === request) this.applyComparison(data);
         } catch (error: unknown) {
           if (this.request === request && !request.signal.aborted) this.comparisonError = `Unable to load league comparison: ${this.message(error)}`;
@@ -472,7 +472,7 @@ export class CurrentPrices {
     this.gggData = data;
     this.tableCharts = {};
     for (const [id, trend] of Object.entries(data.trends)) {
-      const chart = comparisonChart(alignedSamples(data, trend), data.launch, [this.browsingLeague, this.league]);
+      const chart = comparisonChart(alignedSamples(data, trend), data.launch, [this.browsingLeague, data.current_league]);
       if (chart) this.tableCharts[id] = chart;
     }
   }
@@ -481,7 +481,7 @@ export class CurrentPrices {
     const request = this.controller();
     this.error = '';
     try {
-      const data = await this.api.gggPrices(this.browsingLeague, this.category, this.league, this.date, request.signal);
+      const data = await this.api.gggPrices(this.browsingLeague, this.category, this.league, this.date, request.signal, undefined, this.session.compareLeague || this.browsingLeague);
       if (this.request !== request || this.source !== 'ggg') return;
       this.applyGgg(data);
       if (this.selectedItem) {
@@ -567,7 +567,7 @@ export class CurrentPrices {
     this.historyLoading = true;
     try {
       if (this.source === 'ggg') {
-        const data = await this.api.gggPrices(this.browsingLeague, this.category, this.league, this.date, request.signal, this.selectedItem.id);
+        const data = await this.api.gggPrices(this.browsingLeague, this.category, this.league, this.date, request.signal, this.selectedItem.id, this.session.compareLeague || this.browsingLeague);
         if (this.detailRequest !== request) return;
         this.gggHistory = data;
         const trend = data.trends[this.selectedItem.id];
@@ -580,9 +580,9 @@ export class CurrentPrices {
       const history = await this.api.economyHistory(this.browsingLeague, this.category, this.source,
         this.selectedItem.id, '', request.signal);
       if (this.detailRequest === request) { this.history = history; this.restoreHistoryRange(); }
-      if (this.detailRequest === request && this.historical) {
+      if (this.detailRequest === request && (this.historical || this.session.compareLeague)) {
         try {
-          const data = await this.api.economyComparison(this.browsingLeague, this.category, this.source, this.league, this.date, request.signal, this.selectedItem.id);
+          const data = await this.api.economyComparison(this.browsingLeague, this.category, this.source, this.session.compareLeague || this.browsingLeague, this.date, request.signal, this.selectedItem.id);
           if (this.detailRequest !== request) return;
           const trend = data.trends[this.selectedItem.id];
           if (trend && (trend.selected.length || trend.current.length)) {

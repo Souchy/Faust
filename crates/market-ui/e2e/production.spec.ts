@@ -25,15 +25,18 @@ test('production exposes only public tabs and redirects development routes, incl
   for (const path of ['', 'prices', 'exchange', 'triangular-arbitrage', 'arbitrage']) {
     await page.goto(`/#/${path}`);
     await expect(page.getByRole('navigation', { name: 'Market pages' }).getByRole('button')).toHaveText([
-      'Flip analysis', 'Gem flipping',
+      'Fliper', 'Gem flipping',
     ]);
     await expect(page.locator('flip-analysis')).toBeVisible();
     await expect(page.locator('current-prices, currency-exchange, triangular-arbitrage')).toHaveCount(0);
     await expect(page.locator('.dev-only-tab')).toHaveCount(0);
+    await expect(page.getByRole('combobox', { name: 'Compare league', exact: true })).toHaveValue('');
+    await expect(page.getByRole('button', { name: 'Import leagues', exact: true })).toBeVisible();
   }
   await page.getByRole('button', { name: 'Settings', exact: true }).click();
   await page.getByRole('button', { name: 'Browse Ancestors', exact: true }).click();
   await expect(page.locator('flip-analysis')).toBeVisible();
-  await expect(page.getByRole('combobox', { name: 'League', exact: true })).toHaveValue('archive:Ancestors');
+  await expect(page.getByRole('combobox', { name: 'Target league', exact: true })).toHaveValue('Standard');
+  await expect(page.getByRole('combobox', { name: 'Compare league', exact: true })).toHaveValue('Ancestors');
   expect(errors).toEqual([]);
 });

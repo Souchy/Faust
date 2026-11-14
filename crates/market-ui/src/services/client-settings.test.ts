@@ -7,6 +7,18 @@ vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn(), isTauri: vi.fn() }));
 afterEach(() => { vi.unstubAllGlobals(); vi.resetAllMocks(); });
 
 describe('client settings', () => {
+  it('stores Compare through desktop IPC and reports errors', async () => {
+    vi.mocked(isTauri).mockReturnValue(true);
+    vi.mocked(invoke).mockResolvedValueOnce('Mirage').mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new Error('Access denied'));
+    const settings = new ClientSettings();
+    expect(await settings.loadCompareLeague()).toBe('Mirage');
+    await settings.saveCompareLeague('');
+    expect(invoke).toHaveBeenNthCalledWith(1, 'load_compare_league');
+    expect(invoke).toHaveBeenNthCalledWith(2, 'save_compare_league', { league: '' });
+    await expect(settings.saveCompareLeague('Mirage')).rejects.toThrow('Access denied');
+  });
+
   it('uses desktop IPC, not HTTP or browser storage, for its settings file', async () => {
     vi.mocked(isTauri).mockReturnValue(true);
     const period = { start: 3600, end: 7200 };
@@ -36,6 +48,12 @@ describe('client settings', () => {
       setItem: (key: string, value: string) => { values.set(key, value); },
     });
     const settings = new ClientSettings();
+    expect(await settings.loadCompareLeague()).toBe('');
+    await settings.saveCompareLeague('Mirage');
+    expect(await new ClientSettings().loadCompareLeague()).toBe('Mirage');
+    await settings.saveCompareLeague('');
+    expect(await new ClientSettings().loadCompareLeague()).toBe('');
+    await expect(settings.saveCompareLeague(' invalid ')).rejects.toThrow('Invalid Compare');
     expect(await settings.loadFlipPeriod('Standard')).toBeNull();
     await settings.saveFlipPeriod('Standard', { start: 0, end: 3600 });
     await settings.saveFlipPeriod('Mirage', { start: 3600, end: 7200 });

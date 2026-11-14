@@ -1,21 +1,27 @@
-<main pointerdown.trigger="gems?.closeGemTypesOutside($event)" browse-archive.trigger="browseArchive($event.detail)">
+<main pointerdown.trigger="gems?.closeGemTypesOutside($event)" browse-archive.trigger="browseArchive($event.detail)" open-imports.trigger="router.load('/settings')">
   <header class="app-header">
     <nav aria-label="Market pages">
       <button if.bind="devMode" class="dev-only-tab" class.bind="session.page === 'prices' ? 'active' : ''" aria-pressed.bind="session.page === 'prices'" click.trigger="router.load('/prices')">Current prices</button>
       <button if.bind="devMode" class="dev-only-tab" class.bind="session.page === 'exchange' ? 'active' : ''" aria-pressed.bind="session.page === 'exchange'" click.trigger="router.load('/exchange')">Currency Exchange</button>
-      <button class.bind="session.page === 'flips' ? 'active' : ''" aria-pressed.bind="session.page === 'flips'" click.trigger="router.load('/flips')">Flip analysis</button>
+      <button class.bind="session.page === 'flips' ? 'active' : ''" aria-pressed.bind="session.page === 'flips'" click.trigger="router.load('/flips')">Fliper</button>
       <button class.bind="session.page === 'gems' ? 'active' : ''" aria-pressed.bind="session.page === 'gems'" click.trigger="router.load('/gems')">Gem flipping</button>
       <button if.bind="devMode" class="dev-only-tab" class.bind="session.page === 'triangular-arbitrage' ? 'active' : ''" aria-pressed.bind="session.page === 'triangular-arbitrage'" click.trigger="router.load('/triangular-arbitrage')">Triangular arbitrage</button>
     </nav>
-    <label class="league-picker">League
-      <select aria-label="League" value.to-view="session.selectedDataset" change.trigger="selectDataset($event.target.value)">
+    <label class="league-picker">Target
+      <select aria-label="Target league" value.to-view="session.selectedDataset" change.trigger="selectDataset($event.target.value)">
         <option if.bind="!session.leagues.length" value="">Loading leagues...</option>
         <optgroup label="Live"><option repeat.for="league of session.leagues; key: id" value.bind="league.id">${league.name}</option></optgroup>
         <optgroup label="Historical"><option repeat.for="entry of session.archivedDatasets; key: id" value.bind="'archive:' + entry.id">${entry.name} (saved history)</option></optgroup>
       </select>
     </label>
-    <label class="as-of-picker" show.bind="session.page === 'prices' || session.page === 'gems'">As of
-      <select if.bind="session.page === 'prices' || session.historicalLeague" aria-label="As of"
+    <label class="league-picker">Compare
+      <select aria-label="Compare league" value.to-view="session.compareLeague" change.trigger="selectCompareLeague($event.target.value)">
+        <option value="">None</option>
+        <option repeat.for="entry of session.archivedDatasets; key: id" value.bind="entry.id">${entry.name}</option>
+      </select>
+    </label>
+    <label class="as-of-picker" show.bind="session.page === 'prices' || session.page === 'gems'">Snapshot
+      <select if.bind="session.page === 'prices' || session.historicalLeague" aria-label="Snapshot"
         disabled.bind="session.page === 'gems' ? gems?.gemLoading : prices?.isLoading" change.trigger="selectAsOfDate($event.target.value)">
         <option if.bind="!session.historicalLeague" value="" selected.to-view="!session.historicalDate">Latest</option>
         <option repeat.for="day of asOfDates" value.bind="day" selected.to-view="day === session.historicalDate">${day}</option>
@@ -34,5 +40,6 @@
   </header>
 
   <p if.bind="error" class="error banner" role="alert">${error}</p>
+  <p if.bind="session.compareError" class="error banner" role="alert">${session.compareError}</p>
   <au-viewport></au-viewport>
 </main>

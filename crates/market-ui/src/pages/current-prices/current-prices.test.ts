@@ -38,9 +38,39 @@ describe('Current prices page', () => {
     app.setPeriodRange(0, 1);
     expect(app.price(line)).toBe(price);
     expect(app.series[0]?.volume.max).toBe(20);
-    expect(ggg).toHaveBeenLastCalledWith('Standard', 'Currency', 'Standard', '', expect.any(AbortSignal), line.id);
+    expect(ggg).toHaveBeenLastCalledWith('Standard', 'Currency', 'Standard', '', expect.any(AbortSignal), line.id, 'Standard');
   });
 
+  it('keeps target prices and collector context when requesting a comparison overlay', async () => {
+    const { app, api } = workspace();
+    app.source = 'ggg';
+    app.session.compareLeague = 'Ancestors';
+    const overview = { ...economyOverview(), league: 'Standard', source: 'ggg' as const };
+    const ggg = vi.spyOn(api, 'gggPrices').mockResolvedValue({
+      overview, launch: 0, current_launch: -86400, current_league: 'Ancestors', warnings: [], trends: {},
+    });
+    await app.load();
+    expect(ggg).toHaveBeenLastCalledWith('Standard', 'Currency', 'Standard', '', expect.any(AbortSignal), undefined, 'Ancestors');
+    expect(app.overview?.league).toBe('Standard');
+    expect(app.league).toBe('Standard');
+    expect(app.session.historicalLeague).toBe('');
+    expect(app.dataset).toBe('');
+    app.unbinding();
+  });
+  it('does not implicitly overlay the retained live collector when browsing a historical target with Compare None', async () => {
+    const { app, api } = workspace();
+    app.source = 'ggg';
+    app.dataset = 'Ancestors';
+    const overview = { ...economyOverview(), league: 'Ancestors', source: 'ggg' as const };
+    const ggg = vi.spyOn(api, 'gggPrices').mockResolvedValue({
+      overview, launch: 0, current_launch: 0, current_league: 'Ancestors', warnings: [], trends: {},
+    });
+    await app.load();
+    expect(ggg).toHaveBeenLastCalledWith('Ancestors', 'Currency', 'Standard', '', expect.any(AbortSignal), undefined, 'Ancestors');
+    expect(app.session.compareLeague).toBe('');
+    expect(app.session.selectedLeagueId).toBe('Standard');
+    app.unbinding();
+  });
   it('surfaces GGG failures without substituting ninja prices', async () => {
     const { app, api } = workspace();
     app.source = 'ggg';

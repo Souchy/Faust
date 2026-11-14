@@ -42,6 +42,8 @@ struct Filters {
 struct Settings {
     #[serde(default)]
     flip_periods: BTreeMap<String, Period>,
+    #[serde(default)]
+    compare_league: String,
     #[serde(flatten)]
     other: BTreeMap<String, serde_json::Value>,
 }
@@ -91,22 +93,75 @@ fn read(path: &Path) -> io::Result<Settings> {
     for (league, period) in &settings.flip_periods {
         validate(league, period)?;
     }
+    validate_compare(&settings.compare_league)?;
     Ok(settings)
+}
+
+fn validate_compare(league: &str) -> io::Result<()> {
+    if league.len() > 200 || (!league.is_empty() && league.trim() != league) {
+        return Err(io::Error::other("Invalid Compare league."));
+    }
+    Ok(())
 }
 
 fn save(path: &Path, league: String, period: Period) -> io::Result<()> {
     validate(&league, &period)?;
     let mut settings = read(path)?;
     settings.flip_periods.insert(league, period);
+    write(path, &settings)
+}
+
+fn save_compare(path: &Path, league: String) -> io::Result<()> {
+    validate_compare(&league)?;
+    let mut settings = read(path)?;
+    settings.compare_league = league;
+    write(path, &settings)
+}
+
+fn write(path: &Path, settings: &Settings) -> io::Result<()> {
     let parent = path
         .parent()
         .ok_or_else(|| io::Error::other("Settings directory is missing."))?;
     fs::create_dir_all(parent)?;
     let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
-    serde_json::to_writer_pretty(temporary.as_file_mut(), &settings)?;
+    serde_json::to_writer_pretty(temporary.as_file_mut(), settings)?;
     temporary.as_file().sync_all()?;
     temporary.persist(path).map_err(|error| error.error)?;
     Ok(())
+}
+
+#[tauri::command]
+pub async fn load_compare_league(app: tauri::AppHandle) -> Result<String, String> {
+    let path = app
+        .path()
+        .app_config_dir()
+        .map_err(report)?
+        .join("faust.settings.json");
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<ClientSettings>();
+        let _guard = state.0.blocking_lock();
+        Ok::<_, io::Error>(read(&path)?.compare_league)
+    })
+    .await
+    .map_err(report)?
+    .map_err(report)
+}
+
+#[tauri::command]
+pub async fn save_compare_league(app: tauri::AppHandle, league: String) -> Result<(), String> {
+    let path = app
+        .path()
+        .app_config_dir()
+        .map_err(report)?
+        .join("faust.settings.json");
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<ClientSettings>();
+        let _guard = state.0.blocking_lock();
+        save_compare(&path, league)
+    })
+    .await
+    .map_err(report)?
+    .map_err(report)
 }
 
 fn report(error: impl std::fmt::Display) -> String {
@@ -160,6 +215,31 @@ mod tests {
     use super::*;
 
     #[test]
+    fn compare_selection_survives_reopen_and_preserves_periods() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("settings.json");
+        assert_eq!(read(&path).unwrap().compare_league, "");
+        save(
+            &path,
+            "Old".into(),
+            Period {
+                start: 0,
+                end: 3600,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        save_compare(&path, "Old".into()).unwrap();
+        assert_eq!(read(&path).unwrap().compare_league, "Old");
+        save_compare(&path, "".into()).unwrap();
+        let settings = read(&path).unwrap();
+        assert_eq!(settings.compare_league, "");
+        assert_eq!(settings.flip_periods["Old"].end, 3600);
+        assert!(save_compare(&path, " invalid ".into()).is_err());
+        assert_eq!(read(&path).unwrap().compare_league, "");
+    }
+
+    #[test]
     fn legacy_periods_migrate_and_zoom_and_filters_survive_reopening() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("faust.settings.json");
@@ -168,11 +248,9 @@ mod tests {
             r#"{"flip_periods":{"Standard":{"start":0,"end":3600}}}"#,
         )
         .unwrap();
-        assert!(
-            read(&path).unwrap().flip_periods["Standard"]
-                .viewport
-                .is_none()
-        );
+        assert!(read(&path).unwrap().flip_periods["Standard"]
+            .viewport
+            .is_none());
         let value = serde_json::json!({
             "start": 0, "end": 3600, "viewport": { "start": 123.5, "end": 3456.7 },
             "filters": { "minPrice": "1", "maxPrice": "10", "minVolume": "20",
@@ -260,32 +338,28 @@ mod tests {
     fn bad_settings_and_invalid_edits_are_not_overwritten() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("faust.settings.json");
-        assert!(
-            save(
-                &path,
-                "Standard".into(),
-                Period {
-                    start: 1,
-                    end: 3600,
-                    ..Default::default()
-                }
-            )
-            .is_err()
-        );
+        assert!(save(
+            &path,
+            "Standard".into(),
+            Period {
+                start: 1,
+                end: 3600,
+                ..Default::default()
+            }
+        )
+        .is_err());
         assert!(!path.exists());
         fs::write(&path, "broken JSON").unwrap();
-        assert!(
-            save(
-                &path,
-                "Standard".into(),
-                Period {
-                    start: 0,
-                    end: 3600,
-                    ..Default::default()
-                }
-            )
-            .is_err()
-        );
+        assert!(save(
+            &path,
+            "Standard".into(),
+            Period {
+                start: 0,
+                end: 3600,
+                ..Default::default()
+            }
+        )
+        .is_err());
         assert_eq!(fs::read_to_string(&path).unwrap(), "broken JSON");
     }
 }
